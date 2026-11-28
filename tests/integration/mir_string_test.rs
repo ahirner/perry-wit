@@ -312,6 +312,15 @@ function probe(text: string) {
   const match = /(?<word>a)/.exec(text);
   return match?.groups?.word ?? 'missing';
 }
+function doubleGroup(pattern: RegExp) {
+  return 'ab'.replaceAll(pattern, (_, letter, offset) => letter + letter + offset);
+}
+function find(pattern: RegExp, text: string) {
+  return text.search(pattern) + (pattern.test(text) ? 1 : 0);
+}
+function matchText(pattern: RegExp, text: string) { return text.match(pattern); }
+function splitBy(text: string, pattern: RegExp) { return text.split(pattern); }
+function matchOffset(hit: (string | undefined)[]) { return hit.index; }
 export function search(n: number) {
   const chars = 'a-z';
   const suffix = '\\d{2}';
@@ -319,7 +328,7 @@ export function search(n: number) {
   const expression = new RegExp(`[${chars}]+` + suffix, flags);
   const text = '🙂x42';
   let total = 0;
-  for (let i = 0; i < n; i++) total = total + text.search(expression) + (expression.test(text) ? 1 : 0);
+  for (let i = 0; i < n; i++) total = total + find(expression, text);
   return total;
 }
 export function replace(n: number) {
@@ -347,6 +356,16 @@ export function replace(n: number) {
   catch (error) { if (error.message !== 'stop' || calls !== 2) return -11; }
   if (calls !== 2) return -12;
   if ('ab'.replace(/[ab]/g, () => 7) !== '77') return -13;
+  const pair = n > 0 ? /(a)/g : /(b)/g;
+  if ('ab'.replaceAll(pair, (_, letter) => letter + letter) !== (n > 0 ? 'aab' : 'abb')) return -14;
+  if (doubleGroup(pair) !== (n > 0 ? 'aa0b' : 'abb1')) return -15;
+  if (doubleGroup(/(a)(b)/g) !== 'aab') return -16;
+  if ('aa!aa'.replace(/a|aa/g, 'x') !== 'xx!xx' || 'aa!aa'.replace(/aa|a/g, 'x') !== 'x!x') return -17;
+  if ('éa_b é'.replace(/\b\w+\b/g, 'x') !== 'éx é') return -18;
+  if ('ba🙂c'.split(/a|(?:)/u).join('|') !== 'b|🙂|c') return -19;
+  if ('é🙂b'.replace(/(?:)/gu, (_, offset) => String(offset)) !== '0é1🙂2b3') return -20;
+  const pick = n > 0 ? (s: string) => s.toUpperCase() : (_: string, offset: number) => String(offset);
+  if ('aba'.replaceAll('a', pick) !== (n > 0 ? 'AbA' : '0b2')) return -21;
   return n;
 }
 export function named(n: number) {
@@ -361,8 +380,8 @@ export function named(n: number) {
   if (groups.word !== 'a' || result.groups.word !== 'a') return -5;
   const unnamed = /(a)/.exec('a');
   if (unnamed?.groups !== undefined) return -6;
-  const matched = 'zab'.match(/(?<letter>a)(?<tail>b)/);
-  if (matched?.groups?.letter !== 'a') return -7;
+  const matched = matchText(/(?<letter>a)(?<tail>b)/, 'zab');
+  if (matched === null || matched.groups?.letter !== 'a' || matchOffset(matched) !== 1 || matched.input !== 'zab') return -7;
   const regex = /(?<letter>a)(b)?/g;
   if ('ab a'.replace(regex, (match, first, second, offset, input, groups) =>
       groups.letter + ':' + second + ':' + offset + ':' + input.length) !== 'a:b:0:4 a:undefined:3:4') return -8;
@@ -382,6 +401,28 @@ export function named(n: number) {
     if (!new RegExp(`[${chars}]`).test('x')) return -16;
   }
   if (new RegExp(`[${chars}]`).test('x')) return -17;
+  const captured = RegExp('(' + chars + ')');
+  if ('cab'.replace(captured, (_, group) => group + group) !== 'cabab') return -18;
+  if (!new RegExp().test('') || !RegExp().test('')) return -19;
+  let order = '';
+  if (!new RegExp((order += 'p', 'a'), (order += 'f', ''), order += 'x').test('a')) return -20;
+  RegExp('b', '', order += 'y');
+  if (order !== 'pfxy') return -21;
+  const skipped = /(?<absent>y){0}(?<live>x)/;
+  const hit = skipped.exec('x');
+  if (hit === null || hit.length !== 3 || hit[1] !== undefined || hit[2] !== 'x' || hit.groups === undefined || !Object.keys(hit.groups).includes('absent') || hit.groups.absent !== undefined || hit.groups.live !== 'x') return -22;
+  if ('x'.replace(skipped, (_, absent, live, offset, input, groups) =>
+      String(absent) + live + offset + input + String(groups.absent)) !== 'undefinedx0xundefined') return -23;
+  const parts = splitBy('x', skipped);
+  if (parts.length !== 4 || parts[1] !== undefined || parts.join('|') !== '||x|') return -24;
+  if (splitBy('ax', /x/)[0].toUpperCase() !== 'A') return -25;
+  const many = splitBy('x'.repeat(32), skipped);
+  if (many.length !== 97 || many[1] !== undefined || many[94] !== undefined || many[95] !== 'x' || many[96] !== '') return -26;
+  const fixed = /aé|猫/u.exec('é猫');
+  if (fixed === null || fixed.index !== 1 || fixed[0] !== '猫') return -27;
+  const variable = /[a猫]/u.exec('é猫');
+  if (variable === null || variable.index !== 1 || variable[0] !== '猫') return -28;
+  if (/$/.exec('é')?.index !== 1) return -29;
   return n;
 }
 "#,
@@ -392,6 +433,7 @@ export function named(n: number) {
 
     program.stress_collection(true);
     assert_eq!(program.throwing("replace", 17.0), (17.0, 0));
+    assert_eq!(program.throwing("replace", -1.0), (-1.0, 0));
     assert_eq!(program.throwing("named", 23.0), (23.0, 0));
 }
 

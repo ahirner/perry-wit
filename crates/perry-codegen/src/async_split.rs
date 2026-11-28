@@ -28,7 +28,7 @@ use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
         ops::FuncOp,
-        types::{FP64Type, FunctionType, IntegerType},
+        types::FunctionType,
     },
     context::{Context, Ptr},
     identifier::Identifier,
@@ -69,26 +69,19 @@ fn live_across_awaits(
     function: &FuncOp,
     liveness: &perry_mir::LiveValues,
 ) -> Vec<Value> {
-    let order = crate::analysis::value_order(ctx, function);
     let mut across: Vec<Value> = Vec::new();
     let mut seen = HashSet::new();
-    for op in crate::analysis::function_ops(ctx, function) {
+    for op in perry_mir::operations(ctx, function) {
         if Operation::get_op::<AwaitOp>(op, ctx).is_none() {
             continue;
         }
         let result = op.deref(ctx).get_result(0);
-        let mut live: Vec<_> = liveness
-            .after(op)
-            .values()
-            .filter(|value| *value != result)
-            .collect();
-        // Order by definition position for deterministic frame layouts.
-        live.sort_unstable_by_key(|value| order[value]);
-        for value in live {
-            if seen.insert(value) {
-                across.push(value);
-            }
-        }
+        across.extend(
+            liveness
+                .after(op)
+                .values()
+                .filter(|v| *v != result && seen.insert(*v)),
+        );
     }
     across
 }
@@ -151,7 +144,7 @@ pub(crate) fn lower(
         let mut b = FunctionLowering::glue(state, ctx, &ramp);
         let size = b.i32_const(ctx, frame_size as i32);
         let frame = if let Some(offsets) = pointers {
-            let shape = b.pointer_shape(&offsets);
+            let shape = b.state.data.pointer_shape(&offsets);
             let shape = b.i32_const(ctx, shape as i32);
             let frame = b.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
             let pin = b.runtime(ctx, Runtime::GcPin, vec![frame]);
@@ -243,10 +236,7 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
     for (frame_kind, handler) in runtime_frames {
         let frame_kind = b.i32_const(ctx, frame_kind as i32);
         let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, frame_kind]);
-        let handle = b.new_block(ctx, vec![]);
-        let next = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, matches, (handle, vec![]), (next, vec![]));
-        b.block = handle;
+        let next = b.enter_if(ctx, matches);
         b.runtime_void(ctx, handler, vec![frame]);
         b.br(ctx, done, vec![]);
         b.block = next;
@@ -272,22 +262,6 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
 }
 
 impl FunctionLowering<'_, '_> {
-    /// The 8-byte slot bits of a value, as promises store it.
-    pub(crate) fn slot_bits(&mut self, ctx: &mut Context, value: Value) -> Value {
-        if value.get_type(ctx).deref(ctx).is::<FP64Type>() {
-            self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value])
-        } else if value
-            .get_type(ctx)
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|ty| ty.width() == 64)
-        {
-            value
-        } else {
-            self.num(ctx, NumOpcode::I64ExtendI32U, vec![value])
-        }
-    }
-
     /// Pack a MIR value into the promise's eight-byte slot, boxing register pairs.
     pub(crate) fn promise_value_bits(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         let ty = value.get_type(ctx);
@@ -343,10 +317,7 @@ impl FunctionLowering<'_, '_> {
             let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
             let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
             // A rejection makes its exception object pending again and throws its status.
-            let rethrow = self.new_block(ctx, vec![]);
-            let fulfilled = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
-            self.block = rethrow;
+            let fulfilled = self.enter_if(ctx, rejected);
             let status = self.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
             let (throw, args) = self.throw_target(ctx, status);
             self.br(ctx, throw, args);
@@ -429,10 +400,7 @@ impl FunctionLowering<'_, '_> {
         };
         if let Some(signal) = signal {
             let aborted = self.runtime(ctx, Runtime::AbortAborted, vec![signal]);
-            let reject = self.new_block(ctx, vec![]);
-            let start = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, aborted, (reject, vec![]), (start, vec![]));
-            self.block = reject;
+            let start = self.enter_if(ctx, aborted);
             let message = self.state.data.string("The operation was aborted");
             let message = self.i32_const(ctx, message as i32);
             self.runtime_void(ctx, Runtime::AbortReject, vec![promise, message]);
@@ -444,10 +412,7 @@ impl FunctionLowering<'_, '_> {
         let subtask_state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
         let returned_state = self.i32_const(ctx, 2);
         let returned = self.num(ctx, NumOpcode::I32Eq, vec![subtask_state, returned_state]);
-        let now = self.new_block(ctx, vec![]);
-        let later = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, returned, (now, vec![]), (later, vec![]));
-        self.block = now;
+        let later = self.enter_if(ctx, returned);
         self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
         self.br(ctx, joined, vec![]);
         self.block = later;

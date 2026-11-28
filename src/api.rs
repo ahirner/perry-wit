@@ -172,8 +172,10 @@ pub fn compile(
         &modules,
         &resolve,
         world,
-        !options.core_only,
-        false,
+        crate::compiler::WorldOptions {
+            componentize: !options.core_only,
+            ..Default::default()
+        },
     )
     .map_err(Into::into)
 }

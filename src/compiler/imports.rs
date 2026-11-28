@@ -1,46 +1,30 @@
 //! Canonical bindings for the functions exposed by the frontend's WIT source view.
-use super::bind::abi_type;
+use super::abi::Layouts;
 use perry_codegen::boundary::Import;
 use perry_frontend::wit::WorldTypes;
-use wit_parser::{Resolve, WorldId};
+use wit_parser::WorldId;
 
-pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes) -> Vec<Import> {
-    let mut imports = Vec::new();
-    for entry in perry_contract::world_functions(resolve, resolve.worlds[world].imports.iter()) {
-        let module = if entry.interface.is_some() {
-            resolve.name_world_key(entry.key)
-        } else {
-            "$root".into()
-        };
-        let function = entry.function;
-        let Ok(params) = function
-            .params
-            .iter()
-            .map(|parameter| abi_type(resolve, &parameter.ty))
-            .collect()
-        else {
-            continue;
-        };
-        let Ok(result) = function
+pub(super) fn bindings<'r>(
+    layouts: &mut Layouts<'r>,
+    world: WorldId,
+) -> (WorldTypes<'r>, Vec<Import>) {
+    WorldTypes::with_imports(layouts.resolve, Some(world), |module, binding, function| {
+        let result = function
             .result
-            .as_ref()
-            .map(|ty| abi_type(resolve, ty))
+            .map(|ty| layouts.value(ty))
             .transpose()
-        else {
-            continue;
-        };
-        let Some(binding) = types.import_function(resolve, &module, function) else {
-            continue;
-        };
-        imports.push(Import {
-            binding,
-            module,
+            .ok()?;
+        let core = layouts.signature(function, true);
+        let (params, indirect_size) = layouts.parameters(function, &core).ok()?;
+        Some(Import {
+            binding: binding.into(),
+            module: module.into(),
             name: function.name.clone(),
             params,
+            indirect_size,
             result,
             asynchronous: function.kind.is_async(),
-            kind: perry_codegen::boundary::ImportKind::Function,
-        });
-    }
-    imports
+            kind: perry_codegen::boundary::ImportKind::Function(core),
+        })
+    })
 }

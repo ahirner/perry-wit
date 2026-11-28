@@ -2,7 +2,7 @@
 //! scalar, constant, global, control-flow, call and promise operations.
 use crate::{
     function::FunctionLowering,
-    regex,
+    module::StaticTable,
     repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
@@ -88,15 +88,9 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if let Some(constant) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx) {
-            let key = (constant.pattern(ctx), constant.flags(ctx));
-            let address = if let Some(&address) = self.state.data.regexes.get(&key) {
-                address
-            } else {
-                let table = regex::compile(&key.0, &key.1)?;
-                let address = self.state.data.append(4, &table);
-                self.state.data.regexes.insert(key, address);
-                address
-            };
+            let address = self
+                .state
+                .static_table(ctx, StaticTable::Regex(constant.literal(ctx)))?;
             let value = self.i32_const(ctx, address as i32);
             self.define(ctx, op, value);
             return Ok(());
@@ -117,7 +111,7 @@ impl FunctionLowering<'_, '_> {
             let extra_len = u32::try_from((bytes.len() - 16) / 4)
                 .map_err(|_| Diagnostic::internal("BigInt literal exceeds maximum length"))?;
             bytes[12..16].copy_from_slice(&extra_len.to_le_bytes());
-            let address = self.state.data.append(8, &bytes);
+            let address = self.state.data.constant(8, bytes);
             let value = self.i32_const(ctx, address as i32);
             self.define(ctx, op, value);
             return Ok(());
@@ -246,9 +240,7 @@ impl FunctionLowering<'_, '_> {
                     self.runtime(ctx, Runtime::StringCompare, operands)
                 };
                 let order = if let Some(join) = join {
-                    self.br(ctx, join, vec![order]);
-                    self.block = join;
-                    join.deref(ctx).get_argument(0)
+                    self.join_value(ctx, join, order)
                 } else {
                     order
                 };

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pliron::builtin::ops::FuncOp;
 use pliron::context::{Context, Ptr};
@@ -11,7 +11,7 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::pass::{AnalysisManager, PassResult};
 use pliron::result::Result;
-use pliron::r#type::{TypeHandle, Typed};
+use pliron::r#type::{TypeHandle, Typed, TypedHandle};
 use pliron::value::Value;
 
 use crate::JsonSchema;
@@ -20,7 +20,7 @@ use crate::calls::CallOp;
 use crate::control::{BrOp, CondBrOp};
 use crate::intrinsics::{Intrinsic, JsonStringifyOp, intrinsic_of};
 use crate::optional::{UnwrapOp, absence, present_type};
-use crate::types::VariantType;
+use crate::types::RecordType;
 
 /// MIR pass that recognizes `JSON.parse<T>(JSON.stringify(value))` and rewrites
 /// provably compatible schemas into a schema-driven deep-copy and normalization helper.
@@ -29,33 +29,36 @@ pub(crate) fn normalize_json_copy(
     ctx: &mut Context,
     analyses: &mut AnalysisManager,
 ) -> Result<PassResult> {
-    let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
-    let mut rewrites = 0u64;
-    let mut missed = 0u64;
+    let facts = analyses.get_analysis::<crate::ProgramFacts>(root, ctx)?;
+    let mut rewrites = Vec::new();
+    let mut missed = 0;
 
-    for func in crate::aggregates::functions(root, ctx) {
-        for site in find_parse_stringify_sites(func, ctx) {
-            let source_ty = site.source_value.get_type(ctx);
-            if can_rewrite_parse_stringify(ctx, &facts, func, &site, source_ty, site.target_ty) {
-                rewrite_site(ctx, &site);
-                rewrites += 1;
+    for func in crate::functions(root, ctx) {
+        for op in crate::operations(ctx, &func) {
+            let Some(site) = ParseStringifySite::at(ctx, op) else {
+                continue;
+            };
+            if can_rewrite_parse_stringify(ctx, &facts, func, &site)? {
+                rewrites.push(site);
             } else {
                 missed += 1;
             }
         }
     }
 
-    if rewrites > 0 || missed > 0 {
+    let mut result = PassResult::default();
+    result.ir_changed = (!rewrites.is_empty()).into();
+    if !rewrites.is_empty() || missed > 0 {
         let mut stats = crate::pipeline::optimization_statistics(root, ctx);
-        stats.parse_stringify_rewrites += rewrites;
+        stats.parse_stringify_rewrites += rewrites.len() as u64;
         stats.parse_stringify_missed += missed;
         root.deref_mut(ctx)
             .attributes
             .set(crate::pipeline::STATISTICS.clone(), stats);
     }
-
-    let mut result = PassResult::default();
-    result.ir_changed = (rewrites != 0).into();
+    for site in rewrites {
+        rewrite_site(ctx, &site);
+    }
     Ok(result)
 }
 
@@ -66,36 +69,67 @@ pub(crate) struct ParseStringifySite {
     pub(crate) unwrap_op: Option<Ptr<Operation>>,
     pub(crate) consumer_op: Ptr<Operation>,
     pub(crate) intermediate_parse_op: Option<Ptr<Operation>>,
-    pub(crate) source_value: Value,
     target_ty: TypeHandle,
     /// Whether the stringify or its unwrap may throw.
     pub(crate) text_may_throw: bool,
 }
 
 impl ParseStringifySite {
-    pub(crate) fn new(
-        ctx: &Context,
-        source_value: Value,
-        (stringify_op, unwrap_op): (Ptr<Operation>, Option<Ptr<Operation>>),
-        intermediate_parse_op: Option<Ptr<Operation>>,
-        consumer_op: Ptr<Operation>,
-    ) -> Self {
-        let source_ty = source_value.get_type(ctx);
+    pub(crate) fn source(&self, ctx: &Context) -> Value {
+        self.stringify_op.deref(ctx).get_operand(0)
+    }
+
+    pub(crate) fn at(ctx: &Context, op: Ptr<Operation>) -> Option<Self> {
+        if !is_unary(ctx, op) {
+            return None;
+        }
+        let arg = op.deref(ctx).get_operand(0);
+        let (intermediate_parse_op, text) = if is_value_decoder(ctx, op) {
+            let parse_op = arg.defining_op()?;
+            let parses = intrinsic_of(ctx, parse_op) == Some(Intrinsic::JsonParse);
+            (parses && parse_op.deref(ctx).get_num_operands() == 1)
+                .then(|| (Some(parse_op), parse_op.deref(ctx).get_operand(0)))?
+        } else if is_text_decoder(ctx, op)
+            || intrinsic_of(ctx, op) == Some(Intrinsic::JsonParse)
+            // A parse a value decoder consumes is matched from that decoder instead.
+            && !op.deref(ctx).get_result(0).uses(ctx).iter().any(|use_site| {
+                let user = use_site.user_op();
+                is_unary(ctx, user) && is_value_decoder(ctx, user)
+            })
+        {
+            (None, arg)
+        } else {
+            return None;
+        };
+        let def_op = text.defining_op()?;
+        let (stringify_op, unwrap_op) = if Operation::is_op::<UnwrapOp>(def_op, ctx)
+            && def_op.deref(ctx).get_num_operands() == 1
+        {
+            (
+                def_op.deref(ctx).get_operand(0).defining_op()?,
+                Some(def_op),
+            )
+        } else {
+            (def_op, None)
+        };
+        if !Operation::is_op::<JsonStringifyOp>(stringify_op, ctx) || !is_unary(ctx, stringify_op) {
+            return None;
+        }
+        let source_ty = stringify_op.deref(ctx).get_operand(0).get_type(ctx);
         // Stringification throws on a cycle; its result is undefined only for an absent value.
         let stringify_throws =
             crate::may_throw(ctx, stringify_op) && may_be_cyclic(ctx, source_ty, &mut Vec::new());
         let unwrap_throws = unwrap_op.is_some_and(|unwrap| crate::may_throw(ctx, unwrap))
             && (absence(ctx, source_ty).is_some()
                 || source_ty.deref(ctx).is::<crate::types::JsonType>());
-        Self {
+        Some(Self {
             stringify_op,
             unwrap_op,
-            consumer_op,
+            consumer_op: op,
             intermediate_parse_op,
-            source_value,
-            target_ty: consumer_op.deref(ctx).get_result(0).get_type(ctx),
+            target_ty: op.deref(ctx).get_result(0).get_type(ctx),
             text_may_throw: stringify_throws || unwrap_throws,
-        }
+        })
     }
 }
 
@@ -106,70 +140,14 @@ fn may_be_cyclic(ctx: &Context, ty: TypeHandle, path: &mut Vec<TypeHandle>) -> b
     if path.contains(&ty) {
         return true;
     }
-    let Some(schema) = JsonSchema::of(ctx, ty) else {
+    if matches!(JsonSchema::of(ctx, ty), None | Some(JsonSchema::Value)) {
         return true;
-    };
+    }
     path.push(ty);
-    let cyclic = match schema {
-        JsonSchema::Value => true,
-        JsonSchema::Optional(inner) => may_be_cyclic(ctx, inner, path),
-        JsonSchema::Record(record) => record.deref(ctx).fields().map_or(true, |fields| {
-            fields
-                .iter()
-                .any(|&(_, field)| may_be_cyclic(ctx, field, path))
-        }),
-        JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant) => {
-            variant.deref(ctx).cases().iter().any(|(_, payload)| {
-                payload.is_some_and(|payload| may_be_cyclic(ctx, payload, path))
-            })
-        }
-        _ => schema
-            .storage_element()
-            .is_some_and(|element| may_be_cyclic(ctx, element, path)),
-    };
+    let cyclic = crate::types::type_children(&*ty.deref(ctx))
+        .is_none_or(|mut children| children.any(|child| may_be_cyclic(ctx, child, path)));
     path.pop();
     cyclic
-}
-
-fn find_parse_stringify_sites(func: FuncOp, ctx: &Context) -> Vec<ParseStringifySite> {
-    crate::aggregates::operations(ctx, &func)
-        .into_iter()
-        .filter_map(|op| parse_stringify_site(ctx, op))
-        .collect()
-}
-
-/// The site `op` consumes, when it decodes `JSON.parse(JSON.stringify(value))`: a decoder of
-/// text directly, or a value decoder of the parsed JSON.
-fn parse_stringify_site(ctx: &Context, op: Ptr<Operation>) -> Option<ParseStringifySite> {
-    if !is_unary(ctx, op) {
-        return None;
-    }
-    let arg = op.deref(ctx).get_operand(0);
-    let (intermediate_parse_op, text) = if is_value_decoder(ctx, op) {
-        let parse_op = arg.defining_op()?;
-        let parses = intrinsic_of(ctx, parse_op) == Some(Intrinsic::JsonParse);
-        (parses && parse_op.deref(ctx).get_num_operands() == 1)
-            .then(|| (Some(parse_op), parse_op.deref(ctx).get_operand(0)))?
-    } else if is_text_decoder(ctx, op)
-        || intrinsic_of(ctx, op) == Some(Intrinsic::JsonParse)
-            // A parse a value decoder consumes is matched from that decoder instead.
-            && !op.deref(ctx).get_result(0).uses(ctx).iter().any(|use_site| {
-                let user = use_site.user_op();
-                is_unary(ctx, user) && is_value_decoder(ctx, user)
-            })
-    {
-        (None, arg)
-    } else {
-        return None;
-    };
-    let (stringify_op, unwrap_op, source_value) = match_unwrapped_stringify(ctx, text)?;
-    Some(ParseStringifySite::new(
-        ctx,
-        source_value,
-        (stringify_op, unwrap_op),
-        intermediate_parse_op,
-        op,
-    ))
 }
 
 fn is_unary(ctx: &Context, op: Ptr<Operation>) -> bool {
@@ -193,39 +171,12 @@ fn is_value_decoder(ctx: &Context, op: Ptr<Operation>) -> bool {
         || intrinsic_of(ctx, op) == Some(Intrinsic::JsonToNumber)
 }
 
-fn match_unwrapped_stringify(
-    ctx: &Context,
-    text_val: Value,
-) -> Option<(Ptr<Operation>, Option<Ptr<Operation>>, Value)> {
-    let def_op = text_val.defining_op()?;
-    let (stringify_op, unwrap_op) =
-        if Operation::is_op::<UnwrapOp>(def_op, ctx) && def_op.deref(ctx).get_num_operands() == 1 {
-            (
-                def_op.deref(ctx).get_operand(0).defining_op()?,
-                Some(def_op),
-            )
-        } else {
-            (def_op, None)
-        };
-    (Operation::is_op::<JsonStringifyOp>(stringify_op, ctx)
-        && stringify_op.deref(ctx).get_num_operands() == 1)
-        .then(|| {
-            (
-                stringify_op,
-                unwrap_op,
-                stringify_op.deref(ctx).get_operand(0),
-            )
-        })
-}
-
 fn can_rewrite_parse_stringify(
-    ctx: &Context,
-    facts: &crate::facts::ProgramFacts,
+    ctx: &mut Context,
+    facts: &crate::ProgramFacts,
     func: FuncOp,
     site: &ParseStringifySite,
-    source_ty: TypeHandle,
-    target_ty: TypeHandle,
-) -> bool {
+) -> Result<bool> {
     if [
         Some(site.stringify_op),
         site.unwrap_op,
@@ -235,25 +186,24 @@ fn can_rewrite_parse_stringify(
     .flatten()
     .any(|op| op.deref(ctx).get_result(0).uses(ctx).len() != 1)
     {
-        return false;
+        return Ok(false);
     }
 
-    let consumer_res = site.consumer_op.deref(ctx).get_result(0);
-    let reaches_stringify = value_reaches_stringify(ctx, consumer_res);
-    if reaches_stringify && schemas_add_fields(ctx, target_ty, source_ty, &mut SchemaPairs::new()) {
-        return false;
-    }
-    if (reaches_stringify || schemas_add_fields(ctx, source_ty, target_ty, &mut SchemaPairs::new()))
-        && facts.may_have_json_residue(ctx, &func, site.source_value)
+    let source = site.source(ctx);
+    let pair = (source.get_type(ctx), site.target_ty);
+    let Some((adds_fields, drops_fields)) =
+        JsonCopyPlan::with(ctx, pair, |_, plan| (plan.adds_fields, plan.drops_fields))?
+    else {
+        return Ok(false);
+    };
+    let consumer = site.consumer_op.deref(ctx).get_result(0);
+    let stringify = value_reaches_stringify(ctx, consumer);
+    if stringify && drops_fields
+        || (stringify || adds_fields) && facts.may_have_json_residue(ctx, &func, source)
     {
-        return false;
+        return Ok(false);
     }
-
-    if !JsonSchema::supports_native_copy(ctx, source_ty, target_ty) {
-        return false;
-    }
-
-    !facts.may_prevent_json_copy_between(ctx, &func, site)
+    Ok(!facts.may_prevent_json_copy_between(ctx, &func, site))
 }
 
 /// Whether a `ty` value may hold a record. `seen` holds the types already visited, so a
@@ -262,34 +212,17 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
     if !seen.insert(ty) {
         return false;
     }
-    let inner = present_type(ctx, ty);
-    let schema = JsonSchema::of(ctx, inner);
-    if let Some(JsonSchema::Record(rec)) = schema {
-        let rec = rec.deref(ctx);
-        if rec.is_tuple() {
-            return rec
-                .fields()
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, elem)| type_may_contain_record(ctx, *elem, seen))
-                })
-                .unwrap_or(true);
-        }
-        return true;
+    let ty = present_type(ctx, ty);
+    let Some(schema) = JsonSchema::of(ctx, ty) else {
+        return false;
+    };
+    match schema {
+        JsonSchema::Value => true,
+        JsonSchema::Record(rec) if !rec.deref(ctx).is_tuple() => true,
+        _ => crate::types::type_children(&*ty.deref(ctx)).is_none_or(|mut children| {
+            children.any(|child| type_may_contain_record(ctx, child, seen))
+        }),
     }
-    if matches!(schema, Some(JsonSchema::Value)) {
-        return true;
-    }
-    if let Some(element) = schema.and_then(JsonSchema::storage_element) {
-        return type_may_contain_record(ctx, element, seen);
-    }
-    if let Some(JsonSchema::Variant(var) | JsonSchema::ValueUnion(var)) = schema {
-        return var.deref(ctx).cases().iter().any(|(_, payload)| {
-            payload.is_some_and(|payload| type_may_contain_record(ctx, payload, seen))
-        });
-    }
-    false
 }
 
 fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
@@ -332,238 +265,226 @@ fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
     false
 }
 
-/// Pairs of source and target types already visited by a schema comparison. Recursive schemas
-/// revisit a pair: an `any` comparison answers `false` there and an `all` one `true`, since the
-/// first visit decides the pair (coinductively for `all`).
-type SchemaPairs = HashSet<(TypeHandle, TypeHandle)>;
+type TypePair = (TypeHandle, TypeHandle);
 
-/// Check whether converting `source_ty` to `target_ty` adds a field absent from the source.
-/// Swapping the arguments tests whether the conversion drops a source field, and any tuple-ness
-/// mismatch is already rejected by [schemas_compatible].
-fn schemas_add_fields(
-    ctx: &Context,
-    source_ty: TypeHandle,
-    target_ty: TypeHandle,
-    seen: &mut SchemaPairs,
-) -> bool {
-    if !seen.insert((source_ty, target_ty)) {
-        return false;
-    }
-    let s_inner = present_type(ctx, source_ty);
-    let t_inner = present_type(ctx, target_ty);
-    if s_inner == t_inner {
-        return false;
-    }
-    let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
-    if let (Some(JsonSchema::Record(s_rec)), Some(JsonSchema::Record(t_rec))) = schemas {
-        let (s_rec, t_rec) = (s_rec.deref(ctx), t_rec.deref(ctx));
-        let (Ok(s_fields), Ok(t_fields)) = (s_rec.fields(), t_rec.fields()) else {
-            return true;
-        };
-        if s_rec.is_tuple() {
-            return s_fields
-                .iter()
-                .zip(t_fields.iter())
-                .any(|((_, se), (_, te))| schemas_add_fields(ctx, *se, *te, seen));
-        }
-        // A missing field answers `true` whichever matched fields are compared first.
-        return t_fields.iter().any(|(t_name, t_fty)| {
-            s_fields
-                .iter()
-                .find(|(s_name, _)| s_name == t_name)
-                .is_none_or(|(_, s_fty)| schemas_add_fields(ctx, *s_fty, *t_fty, seen))
-        });
-    }
-    if let (Some(source), Some(target)) = (
-        schemas.0.and_then(JsonSchema::storage_element),
-        schemas.1.and_then(JsonSchema::storage_element),
-    ) {
-        return schemas_add_fields(ctx, source, target, seen);
-    }
-    false
+pub enum CopySlot {
+    Payload(TypePair),
+    Field(TypePair, TypedHandle<RecordType>, usize),
 }
 
-impl JsonSchema {
-    /// Native layouts accepted before and after numeric fact specialization.
-    pub fn supports_native_copy(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool {
-        schemas_compatible(ctx, source, target, &mut SchemaPairs::new())
+impl CopySlot {
+    pub fn types(&self) -> TypePair {
+        match *self {
+            Self::Payload(pair) | Self::Field(pair, ..) => pair,
+        }
     }
 }
 
-/// Whether a typed copy from `source_ty` to `target_ty` matches a JSON round trip.
-fn schemas_compatible(
-    ctx: &Context,
-    source_ty: TypeHandle,
-    target_ty: TypeHandle,
-    seen: &mut SchemaPairs,
-) -> bool {
-    if !seen.insert((source_ty, target_ty)) {
-        return true;
+pliron::dict_key!(COPY_PLANS, "perry_json_copy_plans");
+type CopyPlans = HashMap<TypePair, JsonCopyPlan>;
+
+#[derive(Default)]
+pub struct JsonCopyPlan {
+    slots: HashMap<TypePair, Vec<Option<CopySlot>>>,
+    adds_fields: bool,
+    drops_fields: bool,
+}
+
+impl JsonCopyPlan {
+    fn cached(ctx: &Context, pair: TypePair) -> Option<&Self> {
+        let index = *ctx.aux_data_map.get(&COPY_PLANS)?;
+        ctx.aux_data
+            .get(index)?
+            .downcast_ref::<CopyPlans>()?
+            .get(&pair)
     }
 
-    let s_abs = absence(ctx, source_ty);
-    let t_abs = absence(ctx, target_ty);
-
-    if s_abs == Some(Absence::Both) || t_abs == Some(Absence::Both) {
-        return false;
-    }
-
-    if t_abs == Some(Absence::Undefined) {
-        let t_inner = present_type(ctx, target_ty);
-        if s_abs == Some(Absence::Undefined) {
-            let s_inner = present_type(ctx, source_ty);
-            return schemas_compatible(ctx, s_inner, t_inner, seen);
+    /// Share completed plans for the lifetime of their MIR types. Opaque records can be retried.
+    pub fn with<R>(
+        ctx: &mut Context,
+        pair: TypePair,
+        read: impl FnOnce(&Context, &Self) -> R,
+    ) -> Result<Option<R>> {
+        if let Some(plan) = Self::cached(ctx, pair) {
+            return Ok(Some(read(ctx, plan)));
         }
-        return schemas_compatible(ctx, source_ty, t_inner, seen);
-    }
-
-    if s_abs == Some(Absence::Undefined) {
-        let s_inner = present_type(ctx, source_ty);
-        return schemas_compatible(ctx, s_inner, target_ty, seen);
-    }
-
-    if s_abs == Some(Absence::Null) && t_abs != Some(Absence::Null) {
-        return false;
-    }
-
-    let s_inner = present_type(ctx, source_ty);
-    let t_inner = present_type(ctx, target_ty);
-
-    if absence(ctx, s_inner).is_some() || absence(ctx, t_inner).is_some() {
-        return false;
-    }
-
-    let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
-    if let (Some(JsonSchema::Record(s_rec)), Some(JsonSchema::Record(t_rec))) = schemas {
-        let (s_rec, t_rec) = (s_rec.deref(ctx), t_rec.deref(ctx));
-        if s_rec.kind() != t_rec.kind() {
-            return false;
-        }
-        let (Ok(s_fields), Ok(t_fields)) = (s_rec.fields(), t_rec.fields()) else {
-            return false;
+        let Some(plan) = Self::analyze(ctx, pair) else {
+            return Ok(None);
         };
-        if s_rec.is_tuple() {
-            if s_fields.len() != t_fields.len() {
-                return false;
-            }
-            return s_fields
-                .iter()
-                .zip(t_fields.iter())
-                .all(|((_, se), (_, te))| schemas_compatible(ctx, *se, *te, seen));
-        }
-        if !t_fields.iter().all(|(t_name, t_fty)| {
-            if let Some((_, s_fty)) = s_fields.iter().find(|(s_name, _)| s_name == t_name) {
-                schemas_compatible(ctx, *s_fty, *t_fty, seen)
-            } else {
-                absence(ctx, *t_fty) == Some(Absence::Undefined)
-                    && schemas_compatible(ctx, *t_fty, *t_fty, seen)
-            }
-        }) {
-            return false;
-        }
-        return s_fields.iter().all(|(s_name, s_fty)| {
-            if t_fields.iter().any(|(t_name, _)| t_name == s_name) {
-                true
-            } else {
-                schemas_compatible(ctx, *s_fty, *s_fty, seen)
-            }
-        });
+        let result = read(ctx, &plan);
+        let index = *ctx
+            .aux_data_map
+            .entry(COPY_PLANS.clone())
+            .or_insert_with(|| ctx.aux_data.insert(Box::new(CopyPlans::new())));
+        let Some(plans) = ctx
+            .aux_data
+            .get_mut(index)
+            .and_then(|data| data.downcast_mut::<CopyPlans>())
+        else {
+            return pliron::input_err_noloc!(perry_wit_diagnostics::Diagnostic::internal(
+                "invalid JSON copy plan table"
+            ));
+        };
+        plans.insert(pair, plan);
+        Ok(Some(result))
     }
 
-    match schemas {
-        (Some(JsonSchema::Array(source)), Some(JsonSchema::Array(target))) => {
-            schemas_compatible(ctx, source, target, seen)
+    pub(crate) fn compatible(ctx: &Context, pair: TypePair) -> bool {
+        Self::cached(ctx, pair).is_some() || Self::analyze(ctx, pair).is_some()
+    }
+
+    fn analyze(ctx: &Context, pair: TypePair) -> Option<Self> {
+        let mut plan = Self::default();
+        plan.visit(ctx, pair)?;
+        Some(plan)
+    }
+
+    pub fn slots(&self, types: TypePair) -> Option<&[Option<CopySlot>]> {
+        self.slots.get(&types).map(Vec::as_slice)
+    }
+
+    fn visit(&mut self, ctx: &Context, pair @ (source, target): TypePair) -> Option<()> {
+        if self.slots.contains_key(&pair) {
+            return Some(());
         }
-        (
-            Some(JsonSchema::Dictionary {
-                key: sk, value: sv, ..
-            }),
-            Some(JsonSchema::Dictionary {
-                key: tk, value: tv, ..
-            }),
-        ) => {
-            // Stringification drops undefined dictionary members, changing the entry count.
-            !absence(ctx, sv).is_some_and(|a| a.admits_undefined())
-                && schemas_compatible(ctx, sk, tk, seen)
-                && schemas_compatible(ctx, sv, tv, seen)
-        }
-        (Some(JsonSchema::Variant(source)), Some(JsonSchema::Variant(target)))
-            if source == target =>
+        self.slots.insert(pair, Vec::new());
+        let strip_undefined = |mut ty| {
+            while let Some((inner, Absence::Undefined)) = crate::optional_parts(ctx, ty) {
+                ty = inner;
+            }
+            ty
+        };
+        let (source, target) = (strip_undefined(source), strip_undefined(target));
+        let source_absence = absence(ctx, source);
+        let target_absence = absence(ctx, target);
+        if source_absence == Some(Absence::Both)
+            || target_absence == Some(Absence::Both)
+            || source_absence == Some(Absence::Null) && target_absence != source_absence
         {
-            let variant = source.deref(ctx);
-            variant_is_unambiguous(ctx, &variant)
-                && variant.cases().iter().all(|(_, payload)| {
-                    payload.is_none_or(|ty| {
-                        !present_type(ctx, ty).deref(ctx).is::<crate::NumericType>()
-                            && schemas_compatible(ctx, ty, ty, seen)
-                    })
-                })
+            return None;
         }
-        _ => {
-            let numeric_source = s_inner.deref(ctx).is::<crate::NumericType>()
-                || matches!(
-                    schemas.0,
-                    Some(
-                        JsonSchema::Number
-                            | JsonSchema::Integer {
-                                width: 8 | 16 | 32 | 64,
-                                ..
-                            }
-                    )
-                );
-            let number_target = t_inner.deref(ctx).is::<crate::NumericType>()
-                || matches!(schemas.1, Some(JsonSchema::Number));
-            (numeric_source && number_target)
-                || s_inner == t_inner && is_supported_scalar(ctx, s_inner)
-        }
-    }
-}
-
-fn is_supported_scalar(ctx: &Context, ty: TypeHandle) -> bool {
-    matches!(
-        JsonSchema::of(ctx, ty),
-        Some(
-            JsonSchema::Number
-                | JsonSchema::Integer {
-                    width: 8 | 16 | 32 | 64,
-                    ..
+        let (source, target) = (present_type(ctx, source), present_type(ctx, target));
+        let schemas = (JsonSchema::of(ctx, source), JsonSchema::of(ctx, target));
+        let mut slots = Vec::new();
+        match schemas {
+            (Some(JsonSchema::Record(from)), Some(JsonSchema::Record(to))) => {
+                let (src, dst) = (from.deref(ctx), to.deref(ctx));
+                let (source_fields, target_fields) = (src.fields().ok()?, dst.fields().ok()?);
+                if src.kind() != dst.kind()
+                    || src.is_tuple() && source_fields.len() != target_fields.len()
+                {
+                    return None;
                 }
-                | JsonSchema::Boolean
-                | JsonSchema::String
-        )
-    )
-}
-
-fn variant_is_unambiguous(ctx: &Context, var: &VariantType) -> bool {
-    for (i, (_, p1)) in var.cases().iter().enumerate() {
-        for (_, p2) in var.cases().iter().skip(i + 1) {
-            match (p1, p2) {
-                (None, None) => {}
-                (Some(t1), Some(t2)) => {
-                    if *t1 == *t2 {
-                        return false;
-                    }
-                    let schemas = (JsonSchema::of(ctx, *t1), JsonSchema::of(ctx, *t2));
-                    if matches!(
-                        schemas,
-                        (Some(JsonSchema::Record(_)), Some(JsonSchema::Record(_)))
-                    ) || (schemas.0.and_then(JsonSchema::storage_element).is_some()
-                        && schemas.1.and_then(JsonSchema::storage_element).is_some())
-                    {
-                        return false;
+                for (i, (name, ty)) in target_fields.iter().enumerate() {
+                    let field = if src.kind() == crate::RecordKind::Tuple {
+                        source_fields.get(i).map(|(_, ty)| (i, *ty))
+                    } else {
+                        src.field(name)
+                    };
+                    if let Some((index, source_ty)) = field {
+                        slots.push(Some(CopySlot::Field((source_ty, *ty), from, index)));
+                    } else {
+                        if absence(ctx, *ty) != Some(Absence::Undefined) {
+                            return None;
+                        }
+                        self.adds_fields = true;
+                        self.visit(ctx, (*ty, *ty))?;
+                        slots.push(None);
                     }
                 }
-                _ => {}
+                if !src.is_tuple() {
+                    for (name, ty) in source_fields {
+                        if dst.field(name).is_none() {
+                            self.drops_fields = true;
+                            self.visit(ctx, (*ty, *ty))?;
+                        }
+                    }
+                }
             }
+            (Some(JsonSchema::Array(s)), Some(JsonSchema::Array(t))) => {
+                slots.push(Some(CopySlot::Payload((s, t))))
+            }
+            (
+                Some(JsonSchema::Dictionary {
+                    entry: s, value, ..
+                }),
+                Some(JsonSchema::Dictionary { entry: t, .. }),
+            ) if !crate::admits_undefined(ctx, value) => {
+                slots.push(Some(CopySlot::Payload((s.into(), t.into()))))
+            }
+            (Some(JsonSchema::Variant(s)), Some(JsonSchema::Variant(t))) if s == t => {
+                let variant = s.deref(ctx);
+                let mut shapes = HashSet::new();
+                for (_, payload) in variant.cases() {
+                    let child = if let Some(ty) = *payload {
+                        if !shapes.insert(PayloadShape::of(ctx, ty))
+                            || present_type(ctx, ty).deref(ctx).is::<crate::NumericType>()
+                        {
+                            return None;
+                        }
+                        Some(CopySlot::Payload((ty, ty)))
+                    } else {
+                        None
+                    };
+                    slots.push(child);
+                }
+            }
+            _ if scalar_copy(ctx, source, target, schemas) => slots.push(None),
+            _ => return None,
+        }
+        for slot in slots.iter().flatten() {
+            self.visit(ctx, slot.types())?;
+        }
+        self.slots.insert(pair, slots);
+        Some(())
+    }
+}
+
+fn scalar_copy(
+    ctx: &Context,
+    source: TypeHandle,
+    target: TypeHandle,
+    schemas: (Option<JsonSchema>, Option<JsonSchema>),
+) -> bool {
+    let numeric = source.deref(ctx).is::<crate::NumericType>()
+        || matches!(
+            schemas.0,
+            Some(
+                JsonSchema::Number
+                    | JsonSchema::Integer {
+                        width: 8 | 16 | 32 | 64,
+                        ..
+                    }
+            )
+        );
+    numeric
+        && (target.deref(ctx).is::<crate::NumericType>()
+            || matches!(schemas.1, Some(JsonSchema::Number)))
+        || source == target
+            && (numeric || matches!(schemas.0, Some(JsonSchema::Boolean | JsonSchema::String)))
+}
+
+#[derive(Eq, PartialEq, Hash)]
+enum PayloadShape {
+    Record,
+    Sequence,
+    Value(TypeHandle),
+}
+
+impl PayloadShape {
+    fn of(ctx: &Context, ty: TypeHandle) -> Self {
+        match JsonSchema::of(ctx, ty) {
+            Some(JsonSchema::Record(_)) => Self::Record,
+            Some(JsonSchema::Array(_) | JsonSchema::Dictionary { .. }) => Self::Sequence,
+            _ => Self::Value(ty),
         }
     }
-    true
 }
 
 fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(site.consumer_op));
-    let call = crate::JsonCopyOp::new(ctx, site.source_value, site.target_ty);
+    let call = crate::JsonCopyOp::new(ctx, site.source(ctx), site.target_ty);
     rewriter.insert_operation(ctx, call.get_operation());
     // Keep any CaughtOp immediately following `site.consumer_op` intact so it now
     // checks whether normalization raised an exception inside a try block.
@@ -584,7 +505,7 @@ fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ArrayType, OptionalType, RecordType};
+    use crate::types::{ArrayType, OptionalType};
     use pliron::builtin::types::FP64Type;
 
     #[test]
@@ -594,7 +515,10 @@ mod tests {
         let wide: TypeHandle = RecordType::get(
             ctx,
             pliron::ident!("Wide"),
-            Some(vec![("x".into(), number), ("y".into(), number)]),
+            Some(vec![
+                ("x".into(), number),
+                ("y".into(), OptionalType::get(ctx, number).into()),
+            ]),
         )?
         .into();
         let narrow: TypeHandle = RecordType::get(
@@ -616,9 +540,8 @@ mod tests {
             (wide_outer, narrow_outer, false, true),
             (narrow_outer, wide_outer, true, false),
         ] {
-            let pairs = || SchemaPairs::new();
-            assert_eq!(schemas_add_fields(ctx, source, target, &mut pairs()), adds);
-            assert_eq!(schemas_add_fields(ctx, target, source, &mut pairs()), drops);
+            let plan = JsonCopyPlan::analyze(ctx, (source, target)).unwrap();
+            assert_eq!((plan.adds_fields, plan.drops_fields), (adds, drops));
         }
         Ok(())
     }
@@ -635,12 +558,14 @@ mod tests {
         )?
         .into();
         let node: TypeHandle = RecordType::get(ctx, pliron::ident!("Node"), None)?.into();
+        assert!(JsonCopyPlan::analyze(ctx, (node, node)).is_none());
         let next = OptionalType::get(ctx, ArrayType::get(ctx, node).into()).into();
         RecordType::get(
             ctx,
             pliron::ident!("Node"),
             Some(vec![("next".into(), next)]),
         )?;
+        assert!(JsonCopyPlan::analyze(ctx, (node, node)).is_some());
         let leaves = ArrayType::get(ctx, leaf).into();
         for (ty, cyclic) in [(leaf, false), (leaves, false), (node, true), (next, true)] {
             assert_eq!(may_be_cyclic(ctx, ty, &mut Vec::new()), cyclic);

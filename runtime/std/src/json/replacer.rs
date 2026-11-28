@@ -1,6 +1,6 @@
 //! A suspended depth-first writer. Callback calls occur only in generated code.
 use super::*;
-use crate::runtime::{Buffer, TYPE_ERROR, raise};
+use crate::runtime::{Buffer, TYPE_ERROR};
 use perry_rt_sys::{json::MAX_DEPTH, layout::array};
 
 #[repr(C)]
@@ -56,8 +56,7 @@ fn property_list(value: *mut u8) -> *mut u8 {
     let Some(length) = view::array_length(value) else {
         return core::ptr::null_mut();
     };
-    let (keys, slots) = crate::runtime::array_storage(length as usize);
-    let mut count = 0;
+    let mut keys = crate::runtime::ReferenceArray::with_capacity(length);
     unsafe {
         let mut member = if word(value, 0) == ARRAY {
             node(word(value, 16))
@@ -65,24 +64,19 @@ fn property_list(value: *mut u8) -> *mut u8 {
             core::ptr::null_mut()
         };
         for index in 0..length {
-            let item = next_member(value, &mut member, string_bytes(index_key(index)));
+            let item = next_member(value, &mut member, index_digits(index, &mut [0; 66]));
             if item.is_null() || !matches!(word(item, 0), STRING | NUMBER | INT64 | UINT64) {
                 continue;
             }
             let text = reflection::std_json_display(item);
             let bytes = crate::runtime::bytes(text);
-            if slots[..count]
-                .iter()
-                .any(|&key| crate::runtime::bytes(node(key as u32)) == bytes)
-            {
+            if keys.values().any(|key| crate::runtime::bytes(key) == bytes) {
                 continue;
             }
-            slots[count] = text as u64;
-            count += 1;
+            keys.push(text);
         }
-        set_word(keys, array::LEN as usize, count as u32);
     }
-    keys
+    keys.finish()
 }
 
 #[unsafe(no_mangle)]
@@ -149,83 +143,63 @@ pub(crate) extern "C" fn std_json_replacer_next(state: *mut u8, value: *mut u8) 
         if emit {
             if absent {
                 state.text.extend_from_slice(b"null");
-            } else if let Some(number) = json_number(value) {
-                writer::append_number(&mut state.text, number);
+            } else if let Some(ok) = writer::write_scalar(&mut state.text, value) {
+                if !ok {
+                    return 0;
+                }
             } else {
-                match word(value, 0) {
-                    NULL => state.text.extend_from_slice(b"null"),
-                    BOOLEAN => state.text.extend_from_slice(if word(value, 8) == 0 {
-                        b"false"
-                    } else {
-                        b"true"
-                    }),
-                    STRING => writer::quote(&mut state.text, string_bytes(value)),
-                    BIGINT => {
-                        raise(
+                let mut ancestor = state.frame;
+                while !ancestor.is_null() {
+                    let frame = &*ancestor;
+                    if identity(frame.value) == identity(value) {
+                        perry_rt_sys::raise_static!(
                             TYPE_ERROR,
-                            perry_rt_sys::static_text!("Do not know how to serialize a BigInt"),
+                            "Converting circular structure to JSON"
                         );
                         return 0;
                     }
-                    _ => {
-                        let mut ancestor = state.frame;
-                        while !ancestor.is_null() {
-                            let frame = &*ancestor;
-                            if identity(frame.value) == identity(value) {
-                                raise(
-                                    TYPE_ERROR,
-                                    perry_rt_sys::static_text!(
-                                        "Converting circular structure to JSON"
-                                    ),
-                                );
-                                return 0;
-                            }
-                            ancestor = frame.parent;
-                        }
-                        if state.depth >= MAX_DEPTH {
-                            raise(
-                                TYPE_ERROR,
-                                perry_rt_sys::static_text!(
-                                    "JSON nesting exceeds the supported depth"
-                                ),
-                            );
-                            return 0;
-                        }
-                        let length = view::array_length(value);
-                        let keys = if length.is_some() {
-                            core::ptr::null_mut()
-                        } else if !state.keys.is_null() {
-                            state.keys
-                        } else {
-                            std_json_keys(value)
-                        };
-                        let frame = perry_rt_sys::object!(Frame; parent, value, keys, member);
-                        frame.write(Frame {
-                            parent: state.frame,
-                            value,
-                            keys,
-                            index: 0,
-                            member: if word(value, 0) == ARRAY {
-                                node(word(value, 16))
-                            } else {
-                                core::ptr::null_mut()
-                            },
-                            length: length.unwrap_or_else(|| word(keys, array::LEN as usize)),
-                            array: length.is_some(),
-                            written: false,
-                        });
-                        state.text.push(if length.is_some() { b'[' } else { b'{' });
-                        state.frame = frame;
-                        state.depth += 1;
-                    }
+                    ancestor = frame.parent;
                 }
+                if state.depth >= MAX_DEPTH {
+                    perry_rt_sys::raise_static!(
+                        TYPE_ERROR,
+                        "JSON nesting exceeds the supported depth"
+                    );
+                    return 0;
+                }
+                let length = view::array_length(value);
+                let keys = if length.is_some() {
+                    core::ptr::null_mut()
+                } else if !state.keys.is_null() {
+                    state.keys
+                } else {
+                    std_json_keys(value)
+                };
+                let frame = perry_rt_sys::object!(Frame; parent, value, keys, member);
+                frame.write(Frame {
+                    parent: state.frame,
+                    value,
+                    keys,
+                    index: 0,
+                    member: if word(value, 0) == ARRAY {
+                        node(word(value, 16))
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                    length: length.unwrap_or_else(|| word(keys, array::LEN as usize)),
+                    array: length.is_some(),
+                    written: false,
+                });
+                state.text.push(if length.is_some() { b'[' } else { b'{' });
+                state.frame = frame;
+                state.depth += 1;
             }
         }
         while !state.frame.is_null() {
             let frame = &mut *state.frame;
             if frame.index < frame.length {
                 state.key = if frame.array {
-                    std_json_to_string(index_key(frame.index))
+                    index_text(frame.index)
                 } else {
                     key_at(frame.keys, frame.index)
                 };
@@ -251,7 +225,5 @@ pub(crate) extern "C" fn std_json_replacer_finish(state: *mut u8) -> *mut u8 {
     if state.omitted {
         return core::ptr::null_mut();
     }
-    let text = core::mem::take(&mut state.text);
-    let bytes = text.as_slice();
-    unsafe { crate::runtime::adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
+    unsafe { core::mem::take(&mut state.text).into_string() }
 }

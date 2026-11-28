@@ -3,7 +3,7 @@ use perry_contract::world_functions;
 use std::collections::BTreeSet;
 use wit_parser::{
     Function, FutureIntrinsic, LiftLowerAbi, ManglingAndAbi, Resolve, StreamIntrinsic, Type,
-    TypeDefKind, WasmImport, WorldId, WorldKey,
+    TypeDefKind, TypeIdVisitor, WasmImport, WorldId, WorldKey,
 };
 
 #[derive(Default)]
@@ -98,37 +98,29 @@ impl Requirements {
 /// collections allocate on lowering, whereas future and stream payloads allocate at their
 /// read imports.
 fn lowers_allocation(resolve: &Resolve, ty: Type) -> bool {
-    let Type::Id(id) = ty else {
-        return ty == Type::String;
-    };
-    match &resolve.types[id].kind {
-        TypeDefKind::List(_) | TypeDefKind::Map(..) => true,
-        TypeDefKind::Type(ty) | TypeDefKind::Option(ty) | TypeDefKind::FixedLengthList(ty, _) => {
-            lowers_allocation(resolve, *ty)
+    struct Allocation(bool);
+    impl TypeIdVisitor for Allocation {
+        fn visit_type(&mut self, resolve: &Resolve, ty: &Type) {
+            if self.0 {
+                return;
+            }
+            match ty {
+                Type::String => self.0 = true,
+                Type::Id(id) => match resolve.types[*id].kind {
+                    TypeDefKind::List(_) | TypeDefKind::Map(..) => self.0 = true,
+                    TypeDefKind::Handle(_)
+                    | TypeDefKind::Stream(_)
+                    | TypeDefKind::Future(_)
+                    | TypeDefKind::Unknown => {}
+                    _ => self.visit_type_id(resolve, *id),
+                },
+                _ => {}
+            }
         }
-        TypeDefKind::Record(record) => record
-            .fields
-            .iter()
-            .any(|field| lowers_allocation(resolve, field.ty)),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().any(|ty| lowers_allocation(resolve, *ty)),
-        TypeDefKind::Result(result) => result
-            .ok
-            .iter()
-            .chain(&result.err)
-            .any(|ty| lowers_allocation(resolve, *ty)),
-        TypeDefKind::Variant(variant) => variant
-            .cases
-            .iter()
-            .filter_map(|case| case.ty)
-            .any(|ty| lowers_allocation(resolve, ty)),
-        TypeDefKind::Resource
-        | TypeDefKind::Handle(_)
-        | TypeDefKind::Flags(_)
-        | TypeDefKind::Enum(_)
-        | TypeDefKind::Future(_)
-        | TypeDefKind::Stream(_)
-        | TypeDefKind::Unknown => false,
     }
+    let mut allocation = Allocation(false);
+    allocation.visit_type(resolve, &ty);
+    allocation.0
 }
 
 #[cfg(test)]

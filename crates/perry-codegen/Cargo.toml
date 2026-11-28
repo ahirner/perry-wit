@@ -6,10 +6,14 @@ publish = false
 description = "Lowers perry MIR to the pliron `wasm` dialect and core Wasm"
 
 [dependencies]
+indexmap = "2"
+wit-parser.workspace = true
 perry-abi.workspace = true
+perry-contract.workspace = true
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true
 pliron.workspace = true
+pliron-control.workspace = true
 pliron-wasm = { path = "../pliron-wasm" }
 
 regex-automata = { version = "0.4", default-features = false, features = ["std", "dfa-build", "syntax", "unicode"] }

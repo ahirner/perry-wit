@@ -8,7 +8,7 @@ pub(crate) extern "C" fn std_json_box(bits: u64, tag: i32, schema: *mut u8) -> *
     reflection::box_slot(bits, tag, schema, true)
 }
 
-pub(super) fn read_slot(origin: *mut u8, offset: u32, schema: *mut u8, view: bool) -> *mut u8 {
+fn read_slot(origin: *mut u8, offset: u32, schema: *mut u8, view: bool) -> *mut u8 {
     let (bits, tag) = unsafe {
         let at = origin.add(offset as usize);
         let numeric = word(node(address(schema) & d::SCHEMA_MASK as u32), 0) == d::JSON_NUMERIC;
@@ -21,15 +21,72 @@ pub(super) fn read_slot(origin: *mut u8, offset: u32, schema: *mut u8, view: boo
     reflection::box_slot(bits, tag, schema, view)
 }
 
-fn field(origin: *mut u8, schema: *mut u8, index: u32) -> *mut u8 {
+unsafe fn field_descriptor(schema: *mut u8, index: u32) -> *mut u8 {
+    unsafe { schema.add((d::FIELDS + index * d::FIELD_SIZE) as usize) }
+}
+
+unsafe fn field_table(schema: *mut u8, count: u32) -> *const u32 {
+    unsafe {
+        node(word(
+            schema,
+            (d::FIELDS + count * d::FIELD_SIZE + 8) as usize,
+        ))
+        .cast()
+    }
+}
+
+unsafe fn field_key(schema: *mut u8, index: u32) -> *mut u8 {
+    unsafe { node(word(field_descriptor(schema, index), 0)) }
+}
+
+fn field(origin: *mut u8, schema: *mut u8, index: u32, view: bool) -> *mut u8 {
     let (offset, field_schema) = unsafe {
-        let entry = schema.add((d::FIELDS + index * d::FIELD_SIZE) as usize);
+        let entry = field_descriptor(schema, index);
         (
             word(entry, d::FIELD_OFFSET as usize),
             node(word(entry, d::FIELD_SCHEMA as usize)),
         )
     };
-    read_slot(origin, offset, field_schema, true)
+    read_slot(origin, offset, field_schema, view)
+}
+
+fn array_slot(origin: *mut u8, schema: *mut u8, index: u32, view: bool) -> Option<*mut u8> {
+    array_present(origin, index).then(|| unsafe {
+        let stride = array::Elements::decode(word(schema, 8)).stride();
+        read_slot(
+            node(word(origin, array::DATA as usize)),
+            index * stride,
+            node(word(schema, 4)),
+            view,
+        )
+    })
+}
+
+fn tuple_slot(origin: *mut u8, schema: *mut u8, index: u32) -> *mut u8 {
+    unsafe {
+        if index < word(schema, 4) {
+            return field(origin, schema, index, true);
+        }
+        let graph = node(word(origin, record::JSON as usize));
+        if graph.is_null() {
+            return core::ptr::null_mut();
+        }
+        index
+            .checked_sub(word(graph, METADATA))
+            .map_or(core::ptr::null_mut(), |i| array_element(graph, i))
+    }
+}
+
+fn tuple_length(origin: *mut u8, schema: *mut u8) -> u32 {
+    unsafe {
+        let declared = word(schema, 4);
+        let graph = node(word(origin, record::JSON as usize));
+        if graph.is_null() {
+            declared
+        } else {
+            declared.max(word(graph, METADATA) + word(graph, MEMBER_COUNT))
+        }
+    }
 }
 
 pub(super) fn array_length(value: *mut u8) -> Option<u32> {
@@ -43,18 +100,8 @@ pub(super) fn array_length(value: *mut u8) -> Option<u32> {
                 let (origin, schema) = (node(word(value, 8)), node(word(value, 12)));
                 match word(schema, 0) {
                     d::ARRAY => Some(word(origin, array::LEN as usize)),
-                    d::JSON_TUPLE => {
-                        let graph = if word(value, 0) == VIEW {
-                            node(word(origin, record::JSON as usize))
-                        } else {
-                            core::ptr::null_mut()
-                        };
-                        Some(word(schema, 4).max(if graph.is_null() {
-                            0
-                        } else {
-                            word(graph, METADATA) + word(graph, MEMBER_COUNT)
-                        }))
-                    }
+                    d::JSON_TUPLE if word(value, 0) == VIEW => Some(tuple_length(origin, schema)),
+                    d::JSON_TUPLE => Some(word(schema, 4)),
                     _ => None,
                 }
             }
@@ -91,68 +138,50 @@ pub(super) fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     unsafe {
         let (origin, schema) = (node(word(value, 8)), node(word(value, 12)));
         let count = word(schema, 4);
-        match word(schema, 0) {
-            d::RECORD => {
-                for index in 0..count {
-                    let entry = schema.add((d::FIELDS + index * d::FIELD_SIZE) as usize);
-                    if crate::runtime::bytes(node(word(entry, 0))) == name {
-                        return field(origin, schema, index);
-                    }
+        let view = word(value, 0) == VIEW;
+        match (word(schema, 0), view) {
+            (d::RECORD, _) | (d::JSON_TUPLE, false) => {
+                let table = field_table(schema, count);
+                let index = super::order::lookup_field(table, count, name);
+                if index < count {
+                    return field(origin, schema, index, view);
                 }
-                let graph = node(word(origin, record::JSON as usize));
-                if graph.is_null() {
-                    core::ptr::null_mut()
+                if view {
+                    object_member(node(word(origin, record::JSON as usize)), name)
                 } else {
-                    object_member(graph, name)
+                    core::ptr::null_mut()
                 }
             }
-            d::ARRAY | d::JSON_TUPLE => {
+            (d::ARRAY, _) | (d::JSON_DICTIONARY, false) => {
+                let length = word(origin, array::LEN as usize);
                 if name == b"length" {
-                    return std_json_from_number(f64::from(array_length(value).unwrap_or(0)));
+                    return std_json_from_number(f64::from(length));
                 }
-                let Some(index) = array_index(name) else {
-                    return core::ptr::null_mut();
-                };
-                if word(schema, 0) == d::JSON_TUPLE {
-                    if index < count {
-                        field(origin, schema, index)
-                    } else {
-                        let graph = node(word(origin, record::JSON as usize));
-                        if graph.is_null() {
-                            core::ptr::null_mut()
-                        } else {
-                            index
-                                .checked_sub(word(graph, METADATA))
-                                .map_or(core::ptr::null_mut(), |index| array_element(graph, index))
-                        }
-                    }
-                } else if index < word(origin, array::LEN as usize) && array_present(origin, index)
-                {
-                    let stride = array::Elements::decode(word(schema, 8)).stride();
-                    read_slot(
-                        node(word(origin, array::DATA as usize)),
-                        index * stride,
-                        node(count),
-                        true,
-                    )
-                } else {
-                    core::ptr::null_mut()
-                }
+                array_index(name)
+                    .filter(|&i| i < length)
+                    .and_then(|i| array_slot(origin, schema, i, view))
+                    .unwrap_or_default()
             }
-            d::JSON_DICTIONARY => {
+            (d::JSON_TUPLE, true) => {
+                if name == b"length" {
+                    return std_json_from_number(f64::from(tuple_length(origin, schema)));
+                }
+                array_index(name).map_or(core::ptr::null_mut(), |i| tuple_slot(origin, schema, i))
+            }
+            (d::JSON_DICTIONARY, true) => {
                 let entry_schema = node(count);
                 let data = node(word(origin, array::DATA as usize));
                 for index in (0..word(origin, array::LEN as usize)).rev() {
                     let entry = node(word(data, index as usize * 8));
-                    let key = field(entry, entry_schema, 0);
+                    let key = field(entry, entry_schema, 0, true);
                     let text = reflection::std_json_display(key);
                     if crate::runtime::bytes(text) == name {
-                        return field(entry, entry_schema, 1);
+                        return field(entry, entry_schema, 1, true);
                     }
                 }
                 core::ptr::null_mut()
             }
-            d::JSON_VARIANT => {
+            (d::JSON_VARIANT, true) => {
                 let Some(case) = variant_case(origin, schema) else {
                     return core::ptr::null_mut();
                 };
@@ -183,16 +212,11 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
                 let origin = node(word(value, 8));
                 let schema = node(word(value, 12));
                 if word(schema, 0) == d::ARRAY && word(origin, array::HOLES as usize) != 0 {
-                    let (result, slots) = crate::runtime::array_storage(length as usize);
-                    let mut count = 0;
-                    for index in 0..length {
-                        if array_present(origin, index) {
-                            slots[count] = std_json_to_string(index_key(index)) as u64;
-                            count += 1;
-                        }
-                    }
-                    set_word(result, array::LEN as usize, count as u32);
-                    return result;
+                    return crate::runtime::array(
+                        (0..length)
+                            .filter(|&index| array_present(origin, index))
+                            .map(index_text),
+                    );
                 }
             }
         }
@@ -202,80 +226,61 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
         let (origin, schema) = (node(word(value, 8)), node(word(value, 12)));
         let count = word(schema, 4);
         let graph = match word(schema, 0) {
-            d::RECORD => {
-                let table = node(word(
-                    schema,
-                    (d::FIELDS + count * d::FIELD_SIZE + 8) as usize,
-                ));
-                super::order::order_graph(origin, table.cast(), count)
-            }
+            d::RECORD => super::order::order_graph(origin, field_table(schema, count), count),
             d::JSON_DICTIONARY => {
                 let graph = new_node(OBJECT);
                 let data = node(word(origin, array::DATA as usize));
                 for index in 0..word(origin, array::LEN as usize) {
                     let entry = node(word(data, index as usize * 8));
-                    let key = reflection::std_json_display(field(entry, node(count), 0));
+                    let key = reflection::std_json_display(field(entry, node(count), 0, true));
                     append(graph, core::ptr::null_mut(), std_json_from_string(key));
                 }
                 graph
             }
             d::JSON_VARIANT => {
                 let Some(case) = variant_case(origin, schema) else {
-                    return crate::runtime::array(&[]);
+                    return crate::runtime::array([]);
                 };
                 let payload = word(case, 4) != 0;
-                let graph = variant_graph(origin, schema);
-                let graph = if graph.is_null() {
-                    graph
-                } else {
-                    canonical(graph)
-                };
-                let retained = if graph.is_null() {
+                let graph = canonical(variant_graph(origin, schema));
+                let mut members = children(graph).peekable();
+                let key = |member| node(word(node(member), 24));
+                let capacity = if graph.is_null() {
                     0
                 } else {
-                    word(graph, MEMBER_COUNT) as usize
+                    word(graph, MEMBER_COUNT)
                 };
-                let (keys, slots) =
-                    crate::runtime::array_storage(retained + 1 + usize::from(payload));
-                let mut member = if graph.is_null() { 0 } else { word(graph, 16) };
-                let mut length = 0;
-                while member != 0 && array_index(key_bytes(member)).is_some() {
-                    slots[length] = std_json_to_string(node(word(node(member), 24))) as u64;
-                    length += 1;
-                    member = word(node(member), 4);
+                let mut keys = crate::runtime::ReferenceArray::with_capacity(
+                    capacity.saturating_add(1 + u32::from(payload)),
+                );
+                while let Some(member) =
+                    members.next_if(|&member| array_index(key_bytes(member)).is_some())
+                {
+                    keys.push(std_json_to_string(key(member)));
                 }
-                slots[length] = from_static(perry_rt_sys::static_text!("tag")) as u64;
-                length += 1;
+                keys.push(from_static(perry_rt_sys::static_text!("tag")));
                 if payload {
-                    slots[length] = from_static(perry_rt_sys::static_text!("val")) as u64;
-                    length += 1;
+                    keys.push(from_static(perry_rt_sys::static_text!("val")));
                 }
-                while member != 0 {
-                    let key = node(word(node(member), 24));
+                for member in members {
+                    let key = key(member);
                     let name = string_bytes(key);
                     if name != b"tag" && !(payload && name == b"val") {
-                        slots[length] = std_json_to_string(key) as u64;
-                        length += 1;
+                        keys.push(std_json_to_string(key));
                     }
-                    member = word(node(member), 4);
                 }
-                set_word(keys, array::LEN as usize, length as u32);
-                return keys;
+                return keys.finish();
             }
-            _ => return crate::runtime::array(&[]),
+            _ => return crate::runtime::array([]),
         };
         let graph = canonical(graph);
-        let (keys, slots) = crate::runtime::array_storage(word(graph, MEMBER_COUNT) as usize);
-        let mut member = word(graph, 16);
-        for slot in slots {
-            *slot = std_json_to_string(node(word(node(member), 24))) as u64;
-            member = word(node(member), 4);
-        }
-        keys
+        crate::runtime::array(
+            children(graph).map(|member| std_json_to_string(node(word(node(member), 24)))),
+        )
     }
 }
 
-pub(super) fn array_present(origin: *mut u8, index: u32) -> bool {
+fn array_present(origin: *mut u8, index: u32) -> bool {
     unsafe { !array::is_hole(node(word(origin, array::HOLES as usize)), index) }
 }
 
@@ -309,50 +314,74 @@ pub(super) fn to_json(value: *mut u8) -> *mut u8 {
     }
 }
 
-/// Materialize just one level of a view or native value for consumers of an immutable graph.
+fn snapshot(kind: u32, members: impl Iterator<Item = (*mut u8, *mut u8)>) -> *mut u8 {
+    let graph = new_node(kind);
+    for (item, key) in members {
+        append(graph, item, key);
+    }
+    graph
+}
+
+/// Materialize one level, preserving holes, field presence and property order.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_snapshot(value: *mut u8) -> *mut u8 {
     if value.is_null() {
         return value;
     }
     unsafe {
-        match word(value, 0) {
-            VIEW => {}
-            NATIVE => return super::reflection::native_snapshot(value),
+        let view = match word(value, 0) {
+            VIEW => true,
+            NATIVE => false,
             _ => return value,
-        }
-        let length = array_length(value);
-        let graph = new_node(if length.is_some() { ARRAY } else { OBJECT });
-        let names = if length.is_some() {
-            core::ptr::null_mut()
-        } else {
-            keys(value)
         };
-        let count = length.unwrap_or_else(|| word(names, array::LEN as usize));
-        let origin = node(word(value, 8));
-        let schema = node(word(value, 12));
-        for index in 0..count {
-            let key = if length.is_some() {
-                index_key(index)
-            } else {
+        let (origin, schema) = (node(word(value, 8)), node(word(value, 12)));
+        let kind = word(schema, 0);
+        match (kind, view) {
+            (d::ARRAY, _) | (d::JSON_DICTIONARY, false) => {
+                let elements = (0..word(origin, array::LEN as usize)).map(|i| {
+                    let item =
+                        array_slot(origin, schema, i, view).unwrap_or_else(|| new_node(ABSENT));
+                    (item, core::ptr::null_mut())
+                });
+                snapshot(ARRAY, elements)
+            }
+            (d::JSON_TUPLE, true) => {
+                let elements = (0..tuple_length(origin, schema))
+                    .map(|i| (tuple_slot(origin, schema, i), core::ptr::null_mut()));
+                snapshot(ARRAY, elements)
+            }
+            (_, false) => {
+                let count = word(schema, 4);
+                let fields = (0..count).map(|i| {
+                    let name = field_key(schema, i);
+                    let mut item = field(origin, schema, i, false);
+                    if item.is_null()
+                        && kind == d::RECORD
+                        && !super::order::field_present(
+                            origin,
+                            count,
+                            i,
+                            crate::runtime::bytes(name),
+                        )
+                    {
+                        item = new_node(ABSENT);
+                    }
+                    (item, std_json_from_string(name))
+                });
+                snapshot(OBJECT, fields)
+            }
+            (_, true) => {
+                let names = keys(value);
                 let data = node(word(names, array::DATA as usize));
-                std_json_from_string(node(word(data, index as usize * 8)))
-            };
-            let member = if word(schema, 0) == d::ARRAY && !array_present(origin, index) {
-                new_node(ABSENT)
-            } else {
-                property(value, string_bytes(key))
-            };
-            append(
-                graph,
-                member,
-                if length.is_some() {
-                    core::ptr::null_mut()
-                } else {
-                    key
-                },
-            );
+                let fields = (0..word(names, array::LEN as usize)).map(|i| {
+                    let name = node(word(data, i as usize * 8));
+                    (
+                        property(value, crate::runtime::bytes(name)),
+                        std_json_from_string(name),
+                    )
+                });
+                snapshot(OBJECT, fields)
+            }
         }
-        graph
     }
 }

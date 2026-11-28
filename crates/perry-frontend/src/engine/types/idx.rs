@@ -1,5 +1,6 @@
 //! Index-typed vectors, dense IDs, and canonical type keys.
 use crate::shapes;
+use indexmap::IndexSet;
 use perry_hir::types::LocalId;
 
 mod sealed {
@@ -17,6 +18,7 @@ pub(crate) trait Idx: Copy + Eq {
 }
 
 /// Index-typed vector whose IDs have private fields and are minted only by [`IdxVec::push`].
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct IdxVec<I, T> {
     data: Vec<T>,
     _marker: std::marker::PhantomData<fn(I) -> I>,
@@ -31,27 +33,13 @@ impl<I, T> Default for IdxVec<I, T> {
     }
 }
 
-impl<I, T: Clone> Clone for IdxVec<I, T> {
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data.clone(),
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<I, T: PartialEq> PartialEq for IdxVec<I, T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
-    }
-}
-
-impl<I, T: Eq> Eq for IdxVec<I, T> {}
-
 #[allow(private_bounds)]
 impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
+    pub(crate) fn next_id(&self) -> I {
+        I::from_usize(self.data.len())
+    }
     pub(crate) fn push(&mut self, value: T) -> I {
-        let id = I::from_usize(self.data.len());
+        let id = self.next_id();
         self.data.push(value);
         id
     }
@@ -64,7 +52,7 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
     pub(crate) fn len(&self) -> usize {
         self.data.len()
     }
-    pub(crate) fn ids(&self) -> impl Iterator<Item = I> + use<I, T> {
+    pub(crate) fn ids(&self) -> impl DoubleEndedIterator<Item = I> + use<I, T> {
         (0..self.len()).map(I::from_usize)
     }
     pub(crate) fn filled<U: Clone>(&self, value: U) -> IdxVec<I, U> {
@@ -94,9 +82,6 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
             .enumerate()
             .map(|(i, v)| (I::from_usize(i), v))
     }
-    pub(crate) fn as_slice(&self) -> &[T] {
-        &self.data
-    }
 }
 
 impl<I: Idx, T> std::ops::Index<I> for IdxVec<I, T> {
@@ -117,10 +102,6 @@ macro_rules! id_type {
         $(
             #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
             pub(crate) struct $name(u32);
-            impl $name {
-                #[allow(dead_code)]
-                pub(crate) fn index(self) -> usize { self.0 as usize }
-            }
             impl Idx for $name {
                 fn index(self) -> usize { self.0 as usize }
             }
@@ -135,16 +116,38 @@ macro_rules! id_type {
 }
 
 id_type!(
+    ExprIdx,
+    DeclaredId,
     Ty,
     TemplateId,
     InstanceId,
-    ClassId,
     ClassInstId,
     LocId,
     LocalIdx,
-    NameId,
     HelperId,
 );
+
+/// Stable IDs into append-only sets. A duplicate lookup borrows the key without allocating.
+macro_rules! interned_ids {
+    ($($id:ident => $value:ty),+ $(,)?) => {$(
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+        pub(crate) struct $id(usize);
+
+        impl $id {
+            pub(super) fn intern(set: &mut IndexSet<Box<$value>>, value: &$value) -> Self {
+                Self(set.get_index_of(value).unwrap_or_else(|| set.insert_full(value.into()).0))
+            }
+
+            pub(super) fn get(self, set: &IndexSet<Box<$value>>) -> &$value {
+                &set[self.0]
+            }
+        }
+    )+};
+}
+
+pub(crate) type VariantCase = (shapes::TypeName, Option<Ty>);
+
+interned_ids!(NameId => str, TypeListId => [Ty], PropertiesId => [ObjectProp], CasesId => [VariantCase]);
 
 impl TemplateId {
     pub(crate) const INIT: Self = Self(0);
@@ -171,13 +174,10 @@ impl<S, T> Default for Pool<S, T> {
 
 #[allow(private_bounds)]
 impl<S: sealed::MintSpan, T> Pool<S, T> {
-    pub(crate) fn extend_from_slice(&mut self, items: &[T]) -> S
-    where
-        T: Copy,
-    {
+    pub(crate) fn extend(&mut self, items: impl IntoIterator<Item = T>) -> S {
         let start = self.data.len();
-        self.data.extend_from_slice(items);
-        S::from_range(start, items.len())
+        self.data.extend(items);
+        S::from_range(start, self.data.len() - start)
     }
 }
 
@@ -197,16 +197,6 @@ macro_rules! span_type {
                 start: u32,
                 len: u32,
             }
-            impl $name {
-                #[allow(dead_code)]
-                pub(crate) fn len(self) -> usize {
-                    self.len as usize
-                }
-                #[allow(dead_code)]
-                pub(crate) fn is_empty(self) -> bool {
-                    self.len == 0
-                }
-            }
             impl sealed::MintSpan for $name {
                 fn from_range(start: usize, len: usize) -> Self {
                     debug_assert!(u32::try_from(start).is_ok() && u32::try_from(len).is_ok(), "pool span overflow");
@@ -225,22 +215,43 @@ macro_rules! span_type {
 }
 
 span_type!(
-    TySpan,
-    PropSpan,
-    ParamLocSpan,
     FieldLocSpan,
     DispatchArmSpan,
-    SiteSpan,
+    BindingSpan,
+    PromiseSpan,
+    PlanSpan,
+    LocalPlanSpan,
+    EnvFieldSpan,
+    CaptureConversionSpan,
     CaptureSpan,
-    CapturedLocalSpan,
-    TypeParamSpan,
+    ActivationSpan,
 );
+
+impl IdxVec<LocId, Ty> {
+    pub(in crate::engine) fn append_activation(&mut self, values: Vec<Ty>) -> ActivationSpan {
+        let span = sealed::MintSpan::from_range(self.data.len(), values.len());
+        self.data.extend(values);
+        span
+    }
+}
+
+impl ActivationSpan {
+    pub(in crate::engine) fn locations(self) -> impl ExactSizeIterator<Item = LocId> {
+        sealed::MintSpan::range(self).map(sealed::MintIdx::from_usize)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) enum Receiver<T = Ty> {
+    Class(ClassInstId),
+    Object(T),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) enum CaptureOwner {
     None,
     Instance(InstanceId),
-    Template(TemplateId),
+    Template(TemplateId, Option<Receiver>),
 }
 
 impl CaptureOwner {
@@ -280,6 +291,13 @@ pub(crate) enum CellKind {
     Promise,
 }
 impl CellKind {
+    pub(in crate::engine) fn accepts_index(self, key: Ty) -> bool {
+        match self {
+            Self::Array | Self::LocalArray => matches!(key, Ty::NUMBER | Ty::INT32),
+            Self::Dict => key == Ty::STRING,
+            Self::Promise => false,
+        }
+    }
     pub(crate) fn is_array(self) -> bool {
         matches!(self, Self::Array | Self::LocalArray)
     }
@@ -302,20 +320,51 @@ pub(crate) enum TyKind {
     Boolean,
     Number,
     Int32,
+    Integer(pliron::r#type::TypedHandle<pliron::builtin::types::IntegerType>),
     BigInt,
     String,
     Symbol,
-    Leaf(shapes::TypeId),
-    TypeVar(shapes::TypeId),
+    Timer,
+    Named(shapes::TypeName),
+    Literal(shapes::TypeName),
+    Regex(perry_mir::RegexShape),
+    WitCarrier(pliron::r#type::TypeHandle),
+    Variant(CasesId),
+    Signature {
+        params: PropertiesId,
+        result: Ty,
+        is_async: bool,
+        is_generator: bool,
+    },
+    TypeVar(shapes::TypeName),
     Array(Ty),
-    Cell { loc: LocId, kind: CellKind },
+    Cell {
+        loc: LocId,
+        kind: CellKind,
+    },
     Promise(Ty),
-    Tuple(TySpan),
-    Union(TySpan),
-    Generic { base: shapes::TypeId, args: TySpan },
-    Object { props: PropSpan, index: Option<Ty> },
+    Tuple(TypeListId),
+    Union(TypeListId),
+    Generic {
+        base: shapes::TypeName,
+        args: TypeListId,
+    },
+    Object {
+        props: PropertiesId,
+        index: Option<Ty>,
+    },
     Func(FuncIdentity),
     ClassInst(ClassInstId),
+}
+
+impl TyKind {
+    pub(crate) fn nominal(self) -> Option<(shapes::TypeName, Option<TypeListId>)> {
+        match self {
+            Self::Named(id) => Some((id, None)),
+            Self::Generic { base, args } => Some((base, Some(args))),
+            _ => None,
+        }
+    }
 }
 
 impl Ty {
@@ -331,6 +380,7 @@ impl Ty {
     pub(crate) const BIGINT: Self = Self(9);
     pub(crate) const STRING: Self = Self(10);
     pub(crate) const SYMBOL: Self = Self(11);
+    pub(crate) const TIMER: Self = Self(12);
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -348,15 +398,26 @@ impl LocalFlags {
     pub(crate) const CAPTURED: Self = Self(1 << 8);
     pub(crate) const WRITTEN_FROM_CLOSURE: Self = Self(1 << 9);
     pub(crate) const FORWARD_CAPTURED: Self = Self(1 << 10);
+    pub(crate) const FOR_OF: Self = Self(1 << 11);
+    pub(crate) const GLOBAL_SLOT: Self = Self(1 << 13);
+    pub(crate) const STATIC_FIELD: Self = Self((1 << 14) | Self::GLOBAL_SLOT.0 | Self::GENERATED.0);
+    pub(crate) const GENERATED: Self = Self(1 << 12);
+    pub(crate) fn implicit_parameter(self, param: &perry_hir::ir::Param) -> bool {
+        !self.contains(Self::PARAM_ANNOTATED)
+            && matches!(
+                param.ty,
+                perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
+            )
+    }
+    pub(crate) fn is_explicit(self) -> bool {
+        !self.intersects(Self(Self::GENERATED.0 | Self::INFERRED.0))
+    }
+    pub(crate) const INFERRED_DEFERRED: Self = Self(Self::INFERRED.0 | Self::DEFERRED.0);
     pub(crate) const MODULE_OR_PARAM: Self = Self(Self::MODULE.0 | Self::PARAM.0);
-    pub(crate) const BOXED_TRIGGER: Self = Self(
-        Self::REASSIGNED.0
-            | Self::WRITTEN_FROM_CLOSURE.0
-            | Self::DEFERRED.0
-            | Self::FOR_HEAD.0
-            | Self::FORWARD_CAPTURED.0,
-    );
-    pub(crate) const UNDEF_BOXED: Self = Self(Self::FORWARD_CAPTURED.0 | Self::DEFERRED.0);
+    pub(in crate::engine) const SHARED: Self = Self(Self::MODULE_OR_PARAM.0 | Self::CAPTURED.0);
+    pub(crate) const WRITTEN: Self = Self(Self::REASSIGNED.0 | Self::WRITTEN_FROM_CLOSURE.0);
+    pub(crate) const BOXED_TRIGGER: Self =
+        Self(Self::WRITTEN.0 | Self::DEFERRED.0 | Self::FOR_HEAD.0 | Self::FORWARD_CAPTURED.0);
     pub(crate) const DEFERRED_OR_NULLISH: Self = Self(Self::DEFERRED.0 | Self::NULLISH_INIT.0);
 
     pub(crate) fn insert(&mut self, other: Self) {
@@ -370,34 +431,21 @@ impl LocalFlags {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum LocalStorage {
-    #[default]
-    None,
     Module(LocId),
-    Frame(u32),
+    Activation(u32),
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct LocalInfo {
+pub(crate) struct LocalInfo<'h> {
+    pub(crate) iteration: Option<crate::hir_compat::Binding<'h>>,
+    pub(crate) element: Option<usize>,
+    pub(crate) span: Option<swc_common::Span>,
     pub(crate) id: LocalId,
     pub(crate) owner: TemplateId,
     pub(crate) declared: Ty,
+    pub(crate) annotation: Ty,
     pub(crate) storage: LocalStorage,
     pub(crate) flags: LocalFlags,
-}
-
-impl LocalInfo {
-    pub(crate) fn module_loc(self) -> Option<LocId> {
-        match self.storage {
-            LocalStorage::Module(loc) => Some(loc),
-            _ => None,
-        }
-    }
-    pub(crate) fn frame_slot(self) -> Option<usize> {
-        match self.storage {
-            LocalStorage::Frame(slot) => Some(slot as usize),
-            _ => None,
-        }
-    }
 }

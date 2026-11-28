@@ -2,7 +2,7 @@
 //! exception object ops.
 use crate::{
     function::FunctionLowering,
-    repr::{Repr, i32_type, repr, val_type_is_i64},
+    repr::{Repr, i32_type, repr},
     runtime::Runtime,
 };
 use perry_abi::layout::exception::{KIND, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
@@ -14,10 +14,9 @@ use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_unsupported;
 use pliron::{
     basic_block::BasicBlock,
-    builtin::types::FP64Type,
     context::{Context, Ptr},
     operation::Operation,
-    r#type::{TypeHandle, Typed},
+    r#type::Typed,
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
@@ -216,16 +215,5 @@ impl FunctionLowering<'_, '_> {
         let next = self.new_block(ctx, vec![]);
         self.cond_br(ctx, failed, throw, (next, vec![]));
         self.block = next;
-    }
-
-    /// The zero of Wasm type `ty`.
-    pub(crate) fn zero(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
-        if ty.deref(ctx).is::<FP64Type>() {
-            self.f64_const(ctx, 0.0)
-        } else if val_type_is_i64(ctx, ty) {
-            self.i64_const(ctx, 0)
-        } else {
-            self.i32_const(ctx, 0)
-        }
     }
 }

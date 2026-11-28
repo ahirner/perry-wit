@@ -75,15 +75,7 @@ struct Fetch {
     next: *mut Fetch,
 }
 
-struct Ops(core::cell::UnsafeCell<*mut Fetch>);
-// SAFETY: one instance runs one thread.
-unsafe impl Sync for Ops {}
-static OPS: Ops = Ops(core::cell::UnsafeCell::new(core::ptr::null_mut()));
-
-fn ops() -> &'static mut *mut Fetch {
-    // SAFETY: single-threaded; no reference outlives one entry point.
-    unsafe { &mut *OPS.0.get() }
-}
+perry_rt_sys::single_thread_global!(ops: *mut Fetch = core::ptr::null_mut());
 
 const SUBTASK_RETURNED: u32 = 2;
 

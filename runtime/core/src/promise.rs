@@ -219,29 +219,10 @@ impl Observers {
         }
     }
     unsafe fn insert(&mut self, observer: *mut Observer) {
-        unsafe {
-            (*observer).task_next = self.head;
-            if !self.head.is_null() {
-                (*self.head).task_previous = observer;
-            }
-            self.head = observer;
-        }
+        unsafe { crate::dlist_push_front!(self.head, observer, task_previous, task_next) };
     }
     unsafe fn remove(&mut self, observer: *mut Observer) {
-        unsafe {
-            let previous = (*observer).task_previous;
-            let next = (*observer).task_next;
-            if previous.is_null() {
-                self.head = next;
-            } else {
-                (*previous).task_next = next;
-            }
-            if !next.is_null() {
-                (*next).task_previous = previous;
-            }
-            (*observer).task_previous = ptr::null_mut();
-            (*observer).task_next = ptr::null_mut();
-        }
+        unsafe { crate::dlist_unlink!(self.head, observer, task_previous, task_next) };
     }
     unsafe fn visit(&self, mut visit: impl FnMut(*mut Observer)) {
         let mut observer = self.head;
@@ -457,20 +438,13 @@ impl Signals {
 unsafe fn unlink(observer: *mut Observer) {
     unsafe {
         let promise = (*observer).promise;
-        let previous = (*observer).promise_previous;
-        let next = (*observer).promise_next;
-        if previous.is_null() {
-            (*promise).waiters = next;
-        } else {
-            (*previous).promise_next = next;
-        }
-        if next.is_null() {
-            (*promise).waiters_tail = previous;
-        } else {
-            (*next).promise_previous = previous;
-        }
-        (*observer).promise_next = ptr::null_mut();
-        (*observer).promise_previous = ptr::null_mut();
+        crate::dlist_unlink!(
+            (*promise).waiters,
+            observer,
+            promise_previous,
+            promise_next,
+            tail = (*promise).waiters_tail
+        );
         current().observers.remove(observer);
     }
 }

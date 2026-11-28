@@ -11,6 +11,7 @@ use wasmtime::{
 pub(crate) enum Compiler {
     Standard,
     MemoryChecked,
+    Limited(perry_mir::FactLimits),
 }
 
 impl Compiler {
@@ -26,6 +27,9 @@ impl Compiler {
             perry_wit::component::wit::resolve_source(&format!("{world}.wit"), wit)?;
         let world = resolve.select_world(&[package], Some(world))?;
         Ok(match self {
+            Self::Limited(limits) => perry_wit::compiler::compile_for_world_with_limits(
+                source, file, &resolve, world, true, limits,
+            )?,
             Self::Standard => perry_wit::compile_for_world(source, file, &resolve, world, true)?,
             Self::MemoryChecked => perry_wit::compiler::compile_for_world_with_memory_checks(
                 source, file, &resolve, world,
@@ -50,12 +54,20 @@ impl Compiler {
 /// Compile `source` against a one-export world whose `run` has `signature`. Async worlds may
 /// report errors and wait on timers.
 pub(crate) fn compile_signature(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
+    compile_signature_with(Compiler::Standard, source, signature)
+}
+
+pub(crate) fn compile_signature_with(
+    compiler: Compiler,
+    source: &str,
+    signature: &str,
+) -> Result<perry_wit::Compiled> {
     let imports = if signature.starts_with("async ") {
         "import wasi:cli/stderr@0.3.0; import wasi:clocks/monotonic-clock@0.3.0;"
     } else {
         ""
     };
-    Compiler::Standard.compile(
+    compiler.compile(
         &format!("package test:signature; world test {{ {imports} export run: {signature}; }}"),
         "test",
         "signature.ts",

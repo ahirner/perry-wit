@@ -1,25 +1,42 @@
 //! Entry-module declarations that implement the selected world's exports.
 use super::Locations;
-use crate::hir::Type as HirType;
+use crate::wit::{ResourceId, WitValue};
 use perry_contract::types::Input;
 use perry_hir::types::FuncId;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use swc_common::{Span, Spanned};
 use wit_parser::{Resolve, WorldId, WorldKey};
 
-pub(crate) struct Signature {
-    pub(super) annotations: Vec<Option<Span>>,
-    pub(crate) params: Vec<HirType>,
-    pub(crate) result: HirType,
+pub(crate) enum ExportDeclaration<'r> {
+    Function(perry_contract::WorldFunction<'r>, Vec<Option<Span>>),
+    Destructor,
 }
 
-pub(crate) struct Witness<T> {
+pub(crate) struct Signature<'r> {
+    pub(crate) declaration: ExportDeclaration<'r>,
+    pub(crate) params: Vec<WitValue<'r>>,
+    pub(crate) result: Option<WitValue<'r>>,
+}
+
+pub(crate) type SourceWitness<'r> = Witness<'r, Target<FuncId>>;
+pub(crate) type Witnesses<'r, T> = Vec<Witness<'r, T>>;
+
+pub(crate) struct Witness<'r, T> {
     pub(crate) name: String,
-    pub(crate) signature: Option<Signature>,
+    pub(crate) signature: Option<Signature<'r>>,
     pub(crate) target: Option<T>,
-    pub(crate) is_destructor: bool,
+}
+
+impl<'r, T> Witness<'r, T> {
+    pub(crate) fn with_target<U>(self, target: Option<U>) -> Witness<'r, U> {
+        Witness {
+            name: self.name,
+            signature: self.signature,
+            target,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -32,39 +49,62 @@ enum Declaration<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum ResourceAction<F> {
-    New,
-    Call(F),
-    Static(F),
-    Drop(Option<F>),
+pub(crate) enum Target<F> {
+    Function(F),
+    Constructor(ResourceId),
+    Method(ResourceId, F),
+    Static(ResourceId, F),
+    Destructor(ResourceId, Option<F>),
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum SourceTarget {
-    Function(Span),
-    Resource {
-        owner: usize,
-        action: ResourceAction<Span>,
-    },
+impl<F> Target<F> {
+    pub(crate) fn try_map<G>(self, mut f: impl FnMut(F) -> Result<G>) -> Result<Target<G>> {
+        Ok(match self {
+            Self::Function(id) => Target::Function(f(id)?),
+            Self::Constructor(owner) => Target::Constructor(owner),
+            Self::Method(owner, id) => Target::Method(owner, f(id)?),
+            Self::Static(owner, id) => Target::Static(owner, f(id)?),
+            Self::Destructor(owner, id) => Target::Destructor(owner, id.map(f).transpose()?),
+        })
+    }
 }
 
-pub(super) struct ResourceClass<T> {
-    pub(super) class: T,
-    pub(super) resource: wit_parser::TypeId,
-    pub(super) create: String,
-    pub(super) representation: String,
-    pub(super) source_ty: HirType,
+pub(crate) type ResourceClasses<T> = BTreeMap<ResourceId, ResourceClass<T>>;
+
+pub(crate) struct ResourceClass<T> {
+    pub(crate) class: T,
+    pub(crate) binding: ResourceBinding,
 }
 
-pub(super) struct ClassCall {
-    pub(super) owner: usize,
-    pub(super) action: ResourceAction<FuncId>,
+impl<T> ResourceClass<T> {
+    pub(crate) fn with_class<U>(self, class: U) -> ResourceClass<U> {
+        ResourceClass {
+            class,
+            binding: self.binding,
+        }
+    }
 }
 
-pub(super) struct Roots {
-    namespaces: Vec<Span>,
-    pub(super) witnesses: Vec<Witness<SourceTarget>>,
-    classes: Vec<ResourceClass<Span>>,
+pub(crate) struct ResourceBinding {
+    name: String,
+    pub(crate) create: String,
+    pub(crate) representation: String,
+}
+
+pub(crate) struct Exports<'r> {
+    pub(crate) functions: Vec<Witness<'r, Target<FuncId>>>,
+    pub(crate) resources: ResourceClasses<crate::source::ClassId>,
+}
+
+pub(crate) fn adapter_name(export: usize) -> String {
+    format!("resource_adapter_{export}")
+}
+
+#[derive(Default)]
+pub(super) struct Roots<'r> {
+    namespaces: HashSet<u32>,
+    pub(super) witnesses: Vec<Witness<'r, Target<Span>>>,
+    classes: ResourceClasses<Span>,
 }
 
 impl Declaration<'_> {
@@ -123,40 +163,40 @@ impl<'a> Scope<'a> {
         None
     }
 
-    fn member_declaration(
-        &self,
-        object: &'a ast::ObjectLit,
-        name: &str,
-    ) -> Option<Declaration<'a>> {
-        object.props.iter().rev().find_map(|p| {
-            let ast::PropOrSpread::Prop(p) = p else {
-                return None;
-            };
-            self.declaration(match &**p {
-                ast::Prop::Shorthand(id) if id.sym == name => self.0.get(&id.to_id())?.1,
-                ast::Prop::KeyValue(kv) if key(&kv.key) == Some(name) => {
-                    Declaration::Value(&kv.value)
-                }
-                ast::Prop::Method(m) if key(&m.key) == Some(name) => {
-                    if m.function.is_async || m.function.is_generator {
-                        Declaration::UnsupportedMethod(m.span())
-                    } else {
-                        Declaration::Function(m.span(), &m.function)
-                    }
-                }
-                _ => return None,
+    fn members(&self, object: &'a ast::ObjectLit) -> HashMap<&'a str, Declaration<'a>> {
+        object
+            .props
+            .iter()
+            .filter_map(|p| {
+                let ast::PropOrSpread::Prop(p) = p else {
+                    return None;
+                };
+                let (name, decl) = match &**p {
+                    ast::Prop::Shorthand(id) => (id.sym.as_str(), self.0.get(&id.to_id())?.1),
+                    ast::Prop::KeyValue(kv) => (key(&kv.key)?, Declaration::Value(&kv.value)),
+                    ast::Prop::Method(m) => (
+                        key(&m.key)?,
+                        if m.function.is_async || m.function.is_generator {
+                            Declaration::UnsupportedMethod(m.span())
+                        } else {
+                            Declaration::Function(m.span(), &m.function)
+                        },
+                    ),
+                    _ => return None,
+                };
+                Some((name, self.declaration(decl)?))
             })
-        })
+            .collect()
     }
 }
 
-pub(super) fn resolve<'a>(
+pub(super) fn resolve<'a, 'r>(
     module: &'a ast::Module,
     exports: &BTreeMap<String, ast::Ident>,
-    world: Option<(&Resolve, WorldId)>,
-    locations: &Locations<'_>,
+    world: Option<(&'r Resolve, WorldId)>,
+    locations: &mut Locations<'_>,
     unresolved: swc_common::SyntaxContext,
-) -> Result<Roots> {
+) -> Result<Roots<'r>> {
     use perry_contract::names::{to_camel_case, to_pascal_case};
     let mut scope = Scope(HashMap::new());
     let mut insert = |id: &'a ast::Ident, decl| {
@@ -184,183 +224,173 @@ pub(super) fn resolve<'a>(
             _ => {}
         }
     }
+    // Flattening and SWC hygiene preserve declaration spans across resolver contexts.
+    let declarations: HashMap<_, _> = scope
+        .0
+        .values()
+        .map(|(id, decl)| (id.span, *decl))
+        .collect();
     let exported = |name: &str| {
-        let id = exports.get(name)?;
-        scope
-            .0
-            .values()
-            .find(|(i, _)| i.span == id.span)
-            .and_then(|(_, d)| scope.declaration(*d))
+        let span = exports.get(name)?.span;
+        Some((span, scope.declaration(*declarations.get(&span)?)?))
     };
-    let mut roots = Roots {
-        namespaces: Vec::new(),
-        witnesses: Vec::new(),
-        classes: Vec::new(),
-    };
+    let mut roots = Roots::default();
     let Some((r, w)) = world else {
         for name in exports.keys() {
-            if let Some(span) = exported(name).and_then(Declaration::function_span) {
+            if let Some(span) = exported(name).and_then(|(_, d)| d.function_span()) {
                 roots.witnesses.push(Witness {
                     name: name.clone(),
                     signature: None,
-                    target: Some(SourceTarget::Function(span)),
-                    is_destructor: false,
+                    target: Some(Target::Function(span)),
                 });
             }
         }
         roots.witnesses.sort_by_key(|w| match w.target {
-            Some(SourceTarget::Function(span)) => Some(span.lo),
+            Some(Target::Function(span)) => Some(span.lo),
             _ => None,
         });
         return Ok(roots);
     };
     let world = &r.worlds[w];
-    let namespace = |k: &WorldKey, id| {
-        let n = interface_name(k, r, id)?;
-        match exported(&to_camel_case(n))? {
-            Declaration::Value(ast::Expr::Object(o)) => Some(o),
-            _ => None,
-        }
-    };
     use swc_ecma_visit::{Visit, VisitWith};
-    struct Uses<'a>(&'a Scope<'a>, Vec<Span>);
+    struct Uses<'a>(&'a Scope<'a>, &'a mut HashSet<u32>);
     impl Visit for Uses<'_> {
         fn visit_ident(&mut self, id: &ast::Ident) {
             if let Some((binding, _)) = self.0.0.get(&id.to_id())
                 && binding.span != id.span
             {
-                self.1.retain(|&s| s != binding.span);
+                self.1.remove(&binding.span.lo.0);
             }
         }
     }
     let mut disposals = Vec::new();
-    let mut classes: Vec<(ResourceClass<Span>, &'a ast::Class)> = Vec::new();
-    for (k, item) in &world.exports {
-        let wit_parser::WorldItem::Interface { id, .. } = item else {
+    let mut namespaces = HashMap::new();
+    let mut methods = HashMap::new();
+    for (k, id) in perry_contract::world_interfaces(&world.exports) {
+        let Some((span, Declaration::Value(ast::Expr::Object(obj)))) =
+            interface_name(k, r, id).and_then(|name| exported(&to_camel_case(name)))
+        else {
             continue;
         };
-        let Some(obj) = namespace(k, *id) else {
-            continue;
-        };
-        if let Some(binding) =
-            interface_name(k, r, *id).and_then(|n| exports.get(&to_camel_case(n)))
-        {
-            roots.namespaces.push(binding.span);
-        }
-        for (name, resource) in &r.interfaces[*id].types {
-            if !matches!(r.types[*resource].kind, wit_parser::TypeDefKind::Resource) {
-                continue;
-            }
+        let members = namespaces.entry(k).or_insert_with(|| scope.members(obj));
+        roots.namespaces.insert(span.lo.0);
+        for (name, resource) in perry_contract::interface_resources(r, id) {
             let Some(Declaration::Class(class)) =
-                scope.member_declaration(obj, &to_pascal_case(name))
+                members.get(to_pascal_case(name).as_str()).copied()
             else {
                 continue;
             };
             let module = r.name_world_key(k);
-            let source_ty = crate::wit::source_type(r, *resource)
+            let source_name = perry_contract::names::NamedType::get(r, resource)
+                .map(|name| name.qualified())
                 .ok_or_else(|| Diagnostic::internal("unnamed exported resource"))?;
-            let owner = classes.len();
-            classes.push((
+            let owner = ResourceId::of(resource);
+            let destructor = format!("{source_name}::[Symbol.dispose]");
+            roots.classes.insert(
+                owner,
                 ResourceClass {
-                    resource: *resource,
                     class: class.span,
-                    source_ty,
-                    create: format!("{module}#new{}", to_pascal_case(name)),
-                    representation: format!("{module}#{}Rep", to_camel_case(name)),
+                    binding: ResourceBinding {
+                        name: source_name,
+                        create: format!(
+                            "{module}#{}",
+                            perry_contract::ResourceOperation::New.name(name)
+                        ),
+                        representation: format!(
+                            "{module}#{}",
+                            perry_contract::ResourceOperation::Representation.name(name)
+                        ),
+                    },
                 },
-                class,
-            ));
-            let member = class.body.iter().find_map(|m| {
+            );
+            let mut member = None;
+            for m in &class.body {
                 let ast::ClassMember::Method(m) = m else {
-                    return None;
+                    continue;
                 };
-                let ast::PropName::Computed(k) = &m.key else {
-                    return None;
-                };
-                let ast::Expr::Member(e) = k.expr.unwrap_parens() else {
-                    return None;
-                };
-                (matches!(&*e.obj,ast::Expr::Ident(id) if id.sym=="Symbol" && id.ctxt==unresolved)
-                    && matches!(&e.prop,ast::MemberProp::Ident(i) if i.sym=="dispose"))
-                .then_some(m.span)
-            });
-            disposals.push(Witness {
-                name: format!("{module}#[dtor]{name}"),
-                signature: Some(Signature {
-                    annotations: Vec::new(),
-                    params: vec![HirType::Number],
-                    result: HirType::Void,
-                }),
-                target: Some(SourceTarget::Resource {
-                    owner,
-                    action: ResourceAction::Drop(member),
-                }),
-                is_destructor: true,
-            });
+                if let Some(name) = key(&m.key) {
+                    methods.entry((owner, m.is_static, name)).or_insert(m.span);
+                    continue;
+                }
+                if let ast::PropName::Computed(k) = &m.key
+                    && let ast::Expr::Member(e) = k.expr.unwrap_parens()
+                    && matches!(&*e.obj,ast::Expr::Ident(id) if id.sym=="Symbol" && id.ctxt==unresolved)
+                    && matches!(&e.prop,ast::MemberProp::Ident(i) if i.sym=="dispose")
+                {
+                    member.get_or_insert(m.span);
+                }
+            }
+            disposals.push((
+                member.unwrap_or(class.span),
+                destructor,
+                Witness {
+                    name: format!("{module}#[dtor]{name}"),
+                    signature: Some(Signature {
+                        declaration: ExportDeclaration::Destructor,
+                        params: vec![WitValue {
+                            resolve: r,
+                            ty: wit_parser::Type::U32,
+                        }],
+                        result: None,
+                    }),
+                    target: Some(Target::Destructor(owner, member)),
+                },
+            ));
         }
     }
-    let mut uses = Uses(&scope, std::mem::take(&mut roots.namespaces));
-    module.visit_with(&mut uses);
-    roots.namespaces = uses.1;
+    module.visit_with(&mut Uses(&scope, &mut roots.namespaces));
     let mut legacy_names = BTreeMap::new();
     for entry in perry_contract::world_functions(r, world.exports.iter()) {
         let f = entry.function;
         let name = entry.implementation_name(r, world);
-        let requirement = if entry.interface.is_some() {
-            perry_contract::export_names::core_export_name(r, entry.key, f)
-        } else {
-            f.name.clone()
-        };
-        let object = entry.interface.and_then(|id| namespace(entry.key, id));
+        let requirement = entry.core_name(r);
         let mut target = None;
         let mut annotations = Vec::new();
-        if let Some(resource) = f.kind.resource()
-            && let Some((owner, (_, class))) = classes
-                .iter()
-                .enumerate()
-                .find(|(_, (c, _))| c.resource == resource)
+        if let Some(owner) = f.kind.resource().map(ResourceId::of)
+            && let Some(class) = roots.classes.get(&owner)
         {
-            let find_method = |is_static: bool| {
-                let method_name = to_camel_case(f.item_name());
-                class.body.iter().find_map(|m| match m {
-                    ast::ClassMember::Method(m)
-                        if m.is_static == is_static
-                            && key(&m.key) == Some(method_name.as_str()) =>
-                    {
-                        Some(m.span)
-                    }
-                    _ => None,
-                })
-            };
-            let action = match f.kind {
-                wit_parser::FunctionKind::Constructor(_) => Some(ResourceAction::New),
-                wit_parser::FunctionKind::Static(_) | wit_parser::FunctionKind::AsyncStatic(_) => {
-                    find_method(true).map(ResourceAction::Static)
+            let member = to_camel_case(f.item_name());
+            let method = |is_static| methods.get(&(owner, is_static, member.as_str())).copied();
+            let declaration = match f.kind {
+                wit_parser::FunctionKind::Constructor(_) => {
+                    Some((class.class, Target::Constructor(owner)))
                 }
-                _ => find_method(false).map(ResourceAction::Call),
+                wit_parser::FunctionKind::Static(_) | wit_parser::FunctionKind::AsyncStatic(_) => {
+                    method(true).map(|s| (s, Target::Static(owner, s)))
+                }
+                _ => method(false).map(|s| (s, Target::Method(owner, s))),
             };
-            if let Some(action) = action {
-                target = Some(SourceTarget::Resource { owner, action });
+            if let Some((span, selected)) = declaration {
+                target = Some(selected);
+                locations.register_generated(
+                    adapter_name(roots.witnesses.len()),
+                    span,
+                    format!("{}::{member}", class.binding.name),
+                );
             }
-        } else if let Some(decl) =
-            object.and_then(|o| scope.member_declaration(o, &to_camel_case(&f.name)))
+        } else if let Some(decl) = namespaces
+            .get(entry.key)
+            .and_then(|members| members.get(to_camel_case(&f.name).as_str()))
+            .copied()
         {
-            match decl {
-                decl if decl.function_span().is_some() => {target = decl.function_span().map(SourceTarget::Function); annotations=decl.annotations();},
-                Declaration::UnsupportedMethod(span) => return Err(locations.annotate(
-                    Diagnostic::unsupported(format!("async and generator method syntax is unsupported for WIT export {requirement}"))
-                        .with_help("Export a reference to a function declaration in the interface object."), span)),
-                _ => {}
+            if let Declaration::UnsupportedMethod(span) = decl {
+                let error = Diagnostic::unsupported(format!(
+                    "async and generator method syntax is unsupported for WIT export {requirement}"
+                ))
+                .with_help("Export a reference to a function declaration in the interface object.");
+                return Err(locations.annotate(error, span));
             }
+            target = decl.function_span().map(Target::Function);
+            annotations = decl.annotations();
         }
         if target.is_none()
-            && let Some(decl) = exported(&name)
+            && let Some((_, decl)) = exported(&name)
             && let Some(span) = decl.function_span()
         {
             if let Some(previous) = legacy_names.insert(name.clone(), requirement.clone()) {
                 return Err(locations.annotate(diag!(codes::CONTRACT_MISMATCH,"WIT exports '{previous}' and '{requirement}' both require TypeScript implementation '{name}'"),span));
             }
-            target = Some(SourceTarget::Function(span));
+            target = Some(Target::Function(span));
             annotations = decl.annotations();
         }
         if target.is_none() && !entry.is_command(r) {
@@ -404,36 +434,34 @@ pub(super) fn resolve<'a>(
                 None => err.with_fallback_span(locations.offset_span(1, 1)),
             });
         }
-        let ty = |mut t| {
-            while let wit_parser::Type::Id(id) = t
+        let ty = |mut ty| {
+            while let wit_parser::Type::Id(id) = ty
                 && let wit_parser::TypeDefKind::Type(inner) = r.types[id].kind
             {
-                t = inner;
+                ty = inner;
             }
-            use wit_parser::Type::*;
-            Ok(match t {
-                U8 | S8 | U16 | S16 | U32 | S32 => HirType::Number,
-                U64 | S64 => HirType::BigInt,
-                _ => crate::wit::source_type_of(r, Input::Reference(t)).ok_or_else(|| {
+            crate::wit::supported(r, Input::Reference(ty))
+                .then_some(WitValue { resolve: r, ty })
+                .ok_or_else(|| {
                     Diagnostic::unsupported(format!(
                         "WIT export {requirement} uses an unsupported type"
                     ))
-                })?,
-            })
+                })
         };
         roots.witnesses.push(Witness {
             name,
             target,
             signature: Some(Signature {
-                annotations,
+                declaration: ExportDeclaration::Function(entry, annotations),
                 params: f.params.iter().map(|p| ty(p.ty)).collect::<Result<_>>()?,
-                result: f.result.map(ty).transpose()?.unwrap_or(HirType::Void),
+                result: f.result.map(ty).transpose()?,
             }),
-            is_destructor: false,
         });
     }
-    roots.classes = classes.into_iter().map(|(c, _)| c).collect();
-    roots.witnesses.extend(disposals);
+    for (span, label, witness) in disposals {
+        locations.register_generated(adapter_name(roots.witnesses.len()), span, label);
+        roots.witnesses.push(witness);
+    }
     Ok(roots)
 }
 
@@ -456,109 +484,105 @@ fn key(prop: &ast::PropName) -> Option<&str> {
     }
 }
 
-impl Roots {
-    pub(super) fn in_hir(self, module: &mut perry_hir::ir::Module) -> Result<Vec<Witness<FuncId>>> {
+impl<'r> Roots<'r> {
+    pub(super) fn in_hir(
+        self,
+        module: &mut perry_hir::ir::Module,
+        locations: &mut Locations,
+    ) -> Result<Exports<'r>> {
         use perry_hir::ir::{Expr, Stmt};
-        module.init.retain(|stmt| {
-            let Stmt::Let {
+        let reference = |e: &Expr| matches!(e, Expr::FuncRef(_) | Expr::ClassRef(_));
+        module.init.retain(|stmt| match stmt {
+            Stmt::Let {
                 id,
                 mutable: false,
                 init: Some(init),
                 ..
-            } = stmt
-            else {
-                return true;
-            };
-            let refs = match init {
-                Expr::Object(fields) => fields
-                    .iter()
-                    .all(|(_, e)| matches!(e, Expr::FuncRef(_) | Expr::ClassRef(_))),
-                Expr::New {
-                    class_name, args, ..
-                } if super::is_object_literal(class_name) => args
-                    .iter()
-                    .all(|e| matches!(e, Expr::FuncRef(_) | Expr::ClassRef(_))),
-                _ => false,
-            };
-            !(refs
-                && module
-                    .local_source_spans
-                    .get(id)
-                    .is_some_and(|s| self.namespaces.iter().any(|span| span.lo.0 == s.start)))
+            } if module
+                .local_source_spans
+                .get(id)
+                .is_some_and(|s| self.namespaces.contains(&s.start)) =>
+            {
+                match init {
+                    Expr::Object(fields) => !fields.iter().all(|(_, e)| reference(e)),
+                    Expr::New {
+                        class_name, args, ..
+                    } if super::is_object_literal(class_name) => !args.iter().all(reference),
+                    _ => true,
+                }
+            }
+            _ => true,
         });
-        let classes = self
+        let classes: HashMap<_, _> = module
             .classes
-            .into_iter()
-            .map(|c| {
-                let range = c.class.lo.0.saturating_sub(1) as usize
-                    ..c.class.hi.0.saturating_sub(1) as usize;
-                let id = module
-                    .class_source_text
-                    .iter()
-                    .find_map(|(id, s)| (s.source_range() == range).then_some(*id))
-                    .ok_or_else(|| Diagnostic::internal("resource class has no HIR declaration"))?;
-                let class_idx = module
-                    .classes
-                    .iter()
-                    .position(|cls| cls.id == id)
-                    .ok_or_else(|| Diagnostic::internal("lost resource class"))?;
-                Ok(ResourceClass {
-                    class: class_idx,
-                    resource: c.resource,
-                    create: c.create,
-                    representation: c.representation,
-                    source_ty: c.source_ty,
-                })
+            .iter()
+            .filter_map(|class| {
+                let text = module.class_source_text.get(&class.id)?;
+                Some((text.source_range(), crate::source::ClassId::of(class)?))
             })
-            .collect::<Result<Vec<_>>>()?;
-        let mut calls = Vec::with_capacity(self.witnesses.len());
-        let mut witnesses = Vec::with_capacity(self.witnesses.len());
+            .collect();
+        let mut resources = BTreeMap::new();
+        for (owner, resource) in self.classes {
+            let span = resource.class;
+            let range = span.lo.0.saturating_sub(1) as usize..span.hi.0.saturating_sub(1) as usize;
+            let &class = classes
+                .get(&range)
+                .ok_or_else(|| Diagnostic::internal("resource class has no HIR declaration"))?;
+            resources.insert(owner, resource.with_class(class));
+        }
+
+        let declarations: HashMap<_, _> = module
+            .closure_source_text
+            .iter()
+            .filter_map(|(&id, text)| Some((text.source_span?, id)))
+            .collect();
+        let mut disposals = HashSet::new();
+        let mut exported_functions = HashMap::new();
+        let mut functions = Vec::with_capacity(self.witnesses.len());
         for w in self.witnesses {
             let id = |span: Span| {
-                module
-                    .closure_source_text
-                    .iter()
-                    .find_map(|(id, meta)| {
-                        (meta.source_span == Some((span.lo.0, span.hi.0))).then_some(*id)
-                    })
+                declarations
+                    .get(&(span.lo.0, span.hi.0))
+                    .copied()
                     .ok_or_else(|| {
                         Diagnostic::internal(format!("no HIR declaration for export '{}'", w.name))
                     })
             };
-            let (target, call) = match w.target {
-                None => (None, None),
-                Some(SourceTarget::Function(span)) => (Some(id(span)?), None),
-                Some(SourceTarget::Resource { owner, action }) => {
-                    let action = match action {
-                        ResourceAction::New => ResourceAction::New,
-                        ResourceAction::Call(span) => ResourceAction::Call(id(span)?),
-                        ResourceAction::Static(span) => ResourceAction::Static(id(span)?),
-                        ResourceAction::Drop(span) => {
-                            ResourceAction::Drop(span.map(id).transpose()?)
-                        }
-                    };
-                    (None, Some(ClassCall { owner, action }))
-                }
-            };
-            calls.push(call);
-            witnesses.push(Witness {
-                name: w.name,
-                signature: w.signature,
-                target,
-                is_destructor: w.is_destructor,
-            });
+            let target = w.target.map(|t| t.try_map(id)).transpose()?;
+            if let Some(Target::Destructor(_, Some(id))) = target {
+                disposals.insert(id);
+            }
+            if let (Some(Target::Function(span)), Some(Target::Function(id))) = (w.target, target) {
+                exported_functions.insert(id, span);
+            }
+            functions.push(w.with_target(target));
         }
-        if !classes.is_empty() {
-            let (local, function) = perry_hir::lexical_frames::max_ids(module);
-            super::resource_classes::bind(
-                module,
-                &classes,
-                &calls,
-                &mut witnesses,
-                local,
-                function,
-            )?;
+        for f in &module.functions {
+            if let Some(&span) = exported_functions.get(&f.id) {
+                locations.register_generated(
+                    f.name.clone(),
+                    span,
+                    super::display_name(&f.name).to_owned(),
+                );
+            }
         }
-        Ok(witnesses)
+        for class in &mut module.classes {
+            for member in class
+                .computed_members
+                .extract_if(.., |m| disposals.remove(&m.function.id))
+            {
+                let method = member.function;
+                module.init.retain(|stmt| !matches!(stmt, Stmt::Expr(Expr::RegisterClassComputedMethod {class_name,method_name,..})
+                    if class_name==&class.name && method_name==&method.name));
+                class.methods.push(method);
+            }
+        }
+        if !disposals.is_empty() {
+            return Err(Diagnostic::internal("missing disposal method"));
+        }
+        Ok(Exports {
+            functions,
+            resources,
+        })
     }
 }

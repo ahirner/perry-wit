@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-description = "Shared control-flow operation definitions for pliron dialects"
+description = "Control-flow operations and SSA analyses shared by pliron dialects"
+
+[dependencies]
+pliron.workspace = true
 
 [lints]
 workspace = true

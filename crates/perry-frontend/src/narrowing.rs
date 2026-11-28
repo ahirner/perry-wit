@@ -1,30 +1,31 @@
 //! Facts a branch condition proves about the values read in each arm, recovered from source
 //! guards because Perry HIR carries no flow-sensitive types.
 use crate::Absence;
+use crate::engine::BodyOwner;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Stmt, UnaryOp},
-    types::{FuncId, LocalId},
-    walker::{stmt_any_expr, walk_expr_children},
+    types::LocalId,
 };
+use std::collections::HashMap;
 
 /// Access path rooted at a local through property reads, such as `x` or `x.a.b`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct Path<'s>(LocalId, Vec<&'s str>);
+pub(crate) struct Path<'s>(LocalId, Vec<&'s str>);
 
 impl<'s> Path<'s> {
     /// The path of the local itself.
-    pub fn local(id: LocalId) -> Self {
+    pub(crate) fn local(id: LocalId) -> Self {
         Self(id, Vec::new())
     }
 
     /// The local the path starts at.
-    pub fn root(&self) -> LocalId {
+    pub(crate) fn root(&self) -> LocalId {
         self.0
     }
 }
 
 /// The access path `expr` reads, or `None` when it is not a local or a property chain on one.
-pub fn path(expr: &Expr) -> Option<Path<'_>> {
+pub(crate) fn path(expr: &Expr) -> Option<Path<'_>> {
     match expr {
         Expr::LocalGet(id) => Some(Path(*id, vec![])),
         Expr::PropertyGet {
@@ -41,7 +42,7 @@ pub fn path(expr: &Expr) -> Option<Path<'_>> {
 /// A strict comparison of an access path with `undefined`: the path is defined in the arm
 /// where the condition evaluates to `defined_when`.
 #[derive(Debug)]
-pub struct DefinedGuard<'s> {
+pub(crate) struct DefinedGuard<'s> {
     path: Path<'s>,
     defined_when: bool,
 }
@@ -49,8 +50,11 @@ pub struct DefinedGuard<'s> {
 impl<'s> DefinedGuard<'s> {
     /// The guard `condition` establishes, if it is `p === undefined` or `p !== undefined`
     /// (either operand order) for an access path `p`.
-    pub fn of(condition: &'s Expr) -> Option<Self> {
-        let Expr::Compare { op, left, right } = condition else {
+    pub(crate) fn of(condition: &'s Expr) -> Option<Self> {
+        let Expr::Compare {
+            op, left, right, ..
+        } = condition
+        else {
             return None;
         };
         let (tested, Absence::Undefined, defined_when) = absence_test(*op, left, right)? else {
@@ -64,14 +68,14 @@ impl<'s> DefinedGuard<'s> {
 
     /// Whether `expr`, evaluated in the arm where the condition is `truth`, reads the guarded
     /// path and is therefore not `undefined`.
-    pub fn proves(&self, truth: bool, expr: &Expr) -> bool {
+    pub(crate) fn proves(&self, truth: bool, expr: &Expr) -> bool {
         self.defined_when == truth && path(expr).is_some_and(|path| path == self.path)
     }
 }
 
 /// What a narrowing guard compares with a string literal.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Discriminant {
+pub(crate) enum Discriminant {
     TypeOf,
     Tag,
 }
@@ -122,13 +126,15 @@ fn comparisons<'s>(
             op: UnaryOp::Not,
             operand,
         } => comparisons(operand, !truth, visit),
-        Expr::Logical { op, left, right }
-            if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) =>
-        {
+        Expr::Logical {
+            op, left, right, ..
+        } if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) => {
             comparisons(left, truth, visit);
             comparisons(right, truth, visit);
         }
-        Expr::Compare { op, left, right } => visit(*op, left, right, truth),
+        Expr::Compare {
+            op, left, right, ..
+        } => visit(*op, left, right, truth),
         _ => {}
     }
 }
@@ -145,9 +151,9 @@ fn truthy_locals(condition: &Expr, truth: bool, visit: &mut impl FnMut(LocalId))
             op: UnaryOp::Not,
             operand,
         } => truthy_locals(operand, !truth, visit),
-        Expr::Logical { op, left, right }
-            if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) =>
-        {
+        Expr::Logical {
+            op, left, right, ..
+        } if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) => {
             truthy_locals(left, truth, visit);
             truthy_locals(right, truth, visit);
         }
@@ -156,7 +162,7 @@ fn truthy_locals(condition: &Expr, truth: bool, visit: &mut impl FnMut(LocalId))
 }
 
 #[derive(Clone, Copy)]
-pub struct Branch {
+pub(crate) struct Branch {
     depth: usize,
     kills: usize,
 }
@@ -164,7 +170,7 @@ pub struct Branch {
 /// The guards in effect, appended as conditions narrow and truncated when branches exit.
 /// An assignment kills the guards on its local in place, so lengths stay valid scope marks.
 #[derive(Default)]
-pub struct Guards<'s> {
+pub(crate) struct Guards<'s> {
     stack: Vec<Guard<'s>>,
     /// Stack indices in kill order, so a branch arm can undo the kills it made.
     kills: Vec<usize>,
@@ -172,11 +178,11 @@ pub struct Guards<'s> {
 
 impl<'s> Guards<'s> {
     /// The scope mark that [`Self::truncate`] returns to.
-    pub fn depth(&self) -> usize {
+    pub(crate) fn depth(&self) -> usize {
         self.stack.len()
     }
 
-    pub fn truncate(&mut self, len: usize) {
+    pub(crate) fn truncate(&mut self, len: usize) {
         self.stack.truncate(len);
         self.kills.retain(|&index| index < len);
     }
@@ -196,7 +202,7 @@ impl<'s> Guards<'s> {
             .map(|g| g.fact)
     }
 
-    pub fn tags<'a>(
+    pub(crate) fn tags<'a>(
         &'a self,
         path: &'a Path<'s>,
         discriminant: Discriminant,
@@ -228,14 +234,10 @@ impl<'s> Guards<'s> {
         truthy_locals(condition, truth, &mut |local| {
             self.push(Path::local(local), Fact::Excludes(Absence::Both));
         });
-        // A later operand may write a value tested by an earlier operand.
-        if self.depth() != 0 {
-            self.assign_in(&[], [condition], |_| None);
-        }
     }
 
     /// Record the tag guards `condition` establishes where it evaluates to `truth`.
-    pub fn condition(&mut self, condition: &'s Expr, truth: bool) {
+    pub(crate) fn condition(&mut self, condition: &'s Expr, truth: bool) {
         comparisons(condition, truth, &mut |op, left, right, truth| match op {
             CompareOp::Eq => self.equality(left, right, truth),
             CompareOp::Ne => self.equality(left, right, !truth),
@@ -245,7 +247,7 @@ impl<'s> Guards<'s> {
 
     /// Record that `left === right` is `equal` when one side is a tag or `typeof` of a path
     /// and the other a string.
-    pub fn equality(&mut self, left: &'s Expr, right: &'s Expr, equal: bool) {
+    pub(crate) fn equality(&mut self, left: &'s Expr, right: &'s Expr, equal: bool) {
         let (object, tag, discriminant) = match (left, right) {
             (
                 Expr::PropertyGet {
@@ -269,7 +271,7 @@ impl<'s> Guards<'s> {
     }
 
     /// End the guards on `local`, which is assigned or bound again.
-    pub fn assign(&mut self, local: LocalId) {
+    pub(crate) fn assign(&mut self, local: LocalId) {
         for (index, guard) in self.stack.iter_mut().enumerate() {
             if !guard.killed && guard.path.root() == local {
                 guard.killed = true;
@@ -279,50 +281,25 @@ impl<'s> Guards<'s> {
     }
 
     /// After an assignment, `local` holds the alternative whose `discriminant` is `tag`.
-    pub fn assign_as(&mut self, local: LocalId, discriminant: Discriminant, tag: &'s str) {
+    pub(crate) fn assign_as(&mut self, local: LocalId, discriminant: Discriminant, tag: &'s str) {
         self.assign(local);
         self.push(Path::local(local), Fact::Tag(discriminant, tag, true));
     }
 
-    /// End the guards on every local a loop or callback body assigns: its later stores
-    /// reach its start on the next iteration. Include writes in statically called closures.
-    pub fn assign_in<'e>(
-        &mut self,
-        statements: &[Stmt],
-        expressions: impl IntoIterator<Item = &'e Expr>,
-        closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
-    ) {
-        if self.stack.is_empty() {
-            return;
-        }
-        let mut scan = Assignments {
-            closure,
-            entered: Vec::new(),
-            assigned: Vec::new(),
-        };
-        scan.statements(statements);
-        for expr in expressions {
-            scan.expression(expr);
-        }
-        for local in scan.assigned {
-            self.assign(local);
-        }
-    }
-
-    pub fn branch(&self) -> Branch {
+    pub(crate) fn branch(&self) -> Branch {
         Branch {
             depth: self.depth(),
             kills: self.kills.len(),
         }
     }
 
-    pub fn other_arm(&mut self, branch: Branch) -> Vec<usize> {
+    pub(crate) fn other_arm(&mut self, branch: Branch) -> Vec<usize> {
         self.truncate(branch.depth);
         self.revive(branch.kills)
     }
 
     /// Keep writes from arms reaching the join. A single surviving arm retains its condition.
-    pub fn join(
+    pub(crate) fn join(
         &mut self,
         branch: Branch,
         then_writes: Vec<usize>,
@@ -357,38 +334,20 @@ impl<'s> Guards<'s> {
     }
 }
 
-/// The locals that statements may assign, entering closures they define or read.
-struct Assignments<F> {
-    closure: F,
-    /// Bound closures already scanned, which also ends recursion through self-reference.
-    entered: Vec<FuncId>,
-    assigned: Vec<LocalId>,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Region {
+    Body(*const [Stmt]),
+    Expression(*const Expr),
 }
 
-impl<'e, F: Fn(FuncId) -> Option<&'e [Stmt]>> Assignments<F> {
-    fn statements(&mut self, statements: &[Stmt]) {
-        for statement in statements {
-            stmt_any_expr(statement, &mut |expr| {
-                self.expression(expr);
-                false
-            });
-        }
-    }
-
-    fn expression(&mut self, expr: &Expr) {
-        match expr {
-            Expr::LocalSet(id, _) | Expr::Update { id, .. } => self.assigned.push(*id),
-            Expr::FuncRef(id) => {
-                if !self.entered.contains(id)
-                    && let Some(body) = (self.closure)(*id)
-                {
-                    self.entered.push(*id);
-                    self.statements(body);
-                }
-            }
-            Expr::Closure { body, .. } => self.statements(body),
-            _ => {}
-        }
-        walk_expr_children(expr, &mut |child| self.expression(child));
+impl Region {
+    pub(crate) fn of<'s>(
+        body: &[Stmt],
+        exprs: impl IntoIterator<Item = &'s Expr>,
+    ) -> impl Iterator<Item = Self> {
+        std::iter::once(Self::Body(std::ptr::from_ref(body)))
+            .chain(exprs.into_iter().map(|expr| Self::Expression(expr)))
     }
 }
+
+pub(crate) type WriteEffects = HashMap<(BodyOwner, Region), Vec<LocalId>>;

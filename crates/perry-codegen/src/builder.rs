@@ -10,16 +10,11 @@ use crate::{
 use perry_wit_diagnostics::{Diagnostic, Result};
 use pliron::{
     basic_block::BasicBlock,
-    builtin::{
-        attributes::{FPDoubleAttr, IntegerAttr},
-        ops::ConstantOp,
-        types::{IntegerType, Signedness},
-    },
+    builtin::{attributes::FPDoubleAttr, ops::ConstantOp},
     context::{Context, Ptr},
     op::Op,
     operation::Operation,
     r#type::TypeHandle,
-    utils::apint::APInt,
     value::Value,
 };
 use pliron_wasm::{
@@ -27,7 +22,6 @@ use pliron_wasm::{
     control::{BrOp, BrTableOp, CondBrOp, ReturnOp, UnreachableOp},
     ops::{CallOp, LoadOp, NumOp, SelectOp, StoreOp},
 };
-use std::num::NonZeroUsize;
 
 impl FunctionLowering<'_, '_> {
     pub(crate) fn new_block(
@@ -40,6 +34,15 @@ impl FunctionLowering<'_, '_> {
         block
     }
 
+    /// Enter the true arm and return the block for the false arm.
+    pub(super) fn enter_if(&mut self, ctx: &mut Context, condition: Value) -> Ptr<BasicBlock> {
+        let yes = self.new_block(ctx, vec![]);
+        let no = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, condition, (yes, vec![]), (no, vec![]));
+        self.block = yes;
+        no
+    }
+
     pub(crate) fn insert(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Ptr<Operation> {
         op.insert_at_back(self.block, ctx);
         op
@@ -50,26 +53,19 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(crate) fn i32_const(&mut self, ctx: &mut Context, value: i32) -> Value {
-        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-        let attr = IntegerAttr::new(
-            ty,
-            APInt::from_u64(
-                value as u32 as u64,
-                const { NonZeroUsize::new(32).unwrap() },
-            ),
-        );
-        let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+        let op = perry_mir::integer_constant(ctx, 32, u64::from(value as u32)).get_operation();
         self.result(ctx, op)
     }
 
     pub(crate) fn i64_const(&mut self, ctx: &mut Context, value: u64) -> Value {
-        let ty = IntegerType::get(ctx, 64, Signedness::Signless);
-        let attr = IntegerAttr::new(
-            ty,
-            APInt::from_u64(value, const { NonZeroUsize::new(64).unwrap() }),
-        );
-        let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+        let op = perry_mir::integer_constant(ctx, 64, value).get_operation();
         self.result(ctx, op)
+    }
+
+    /// The zero of Wasm type `ty`.
+    pub(crate) fn zero(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
+        let zero = pliron_wasm::zero_constant(ctx, ty);
+        self.result(ctx, zero.get_operation())
     }
 
     pub(crate) fn f64_const(&mut self, ctx: &mut Context, value: f64) -> Value {
@@ -174,6 +170,17 @@ impl FunctionLowering<'_, '_> {
     pub(crate) fn br(&mut self, ctx: &mut Context, dest: Ptr<BasicBlock>, args: Vec<Value>) {
         let op = BrOp::new(ctx, dest, args).get_operation();
         self.insert(ctx, op);
+    }
+
+    pub(super) fn join_value(
+        &mut self,
+        ctx: &mut Context,
+        join: Ptr<BasicBlock>,
+        value: Value,
+    ) -> Value {
+        self.br(ctx, join, vec![value]);
+        self.block = join;
+        join.deref(ctx).get_argument(0)
     }
 
     /// `br_table`: `targets[index]`, else `default` (blocks without arguments).

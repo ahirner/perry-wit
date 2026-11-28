@@ -21,6 +21,15 @@ pub mod record {
 }
 
 pub mod array {
+    #[repr(C)]
+    pub struct Header {
+        pub len: u32,
+        pub cap: u32,
+        pub data: *mut u64,
+        pub holes: *mut u8,
+    }
+
+    pub const MIN_CAPACITY: u32 = 4;
     pub const LEN: u32 = 0;
     pub const CAP: u32 = 4;
     pub const DATA: u32 = 8;
@@ -247,63 +256,94 @@ pub mod descriptor {
 pub mod regex;
 
 pub mod numeric {
-    pub const FLOAT: i32 = 0;
-    pub const SIGNED: i32 = 1;
-    pub const UNSIGNED: i32 = 2;
-    pub const UNDEFINED: i32 = 3;
-    pub const NULL: i32 = 4;
-    pub const OMITTED: i32 = 5;
-    pub const U8: i32 = 6;
-    pub const S8: i32 = 7;
-    pub const U16: i32 = 8;
-    pub const S16: i32 = 9;
-    pub const U32: i32 = 10;
-    pub const S32: i32 = 11;
-    pub const U64: i32 = 12;
-    pub const S64: i32 = 13;
-
-    /// A decoded numeric tag converted from the raw `i32` ABI discriminant via `TryFrom`
-    /// for exhaustive matching.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Tag {
-        Float,
-        Signed,
-        Unsigned,
-        Undefined,
-        Null,
-        Omitted,
-        U8,
-        S8,
-        U16,
-        S16,
-        U32,
-        S32,
-        U64,
-        S64,
+    macro_rules! tags {
+        ($($name:ident = $value:literal as $raw:ident),+ $(,)?) => {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            #[repr(i32)]
+            pub enum Tag { $($name = $value),+ }
+            $(pub const $raw: i32 = Tag::$name as i32;)+
+            impl TryFrom<i32> for Tag {
+                type Error = i32;
+                fn try_from(tag: i32) -> Result<Self, i32> {
+                    match tag { $($value => Ok(Self::$name),)+ other => Err(other) }
+                }
+            }
+        }
+    }
+    tags! {
+        Float = 0 as FLOAT, Signed = 1 as SIGNED, Unsigned = 2 as UNSIGNED,
+        Undefined = 3 as UNDEFINED, Null = 4 as NULL, Omitted = 5 as OMITTED,
+        U8 = 6 as U8, S8 = 7 as S8, U16 = 8 as U16, S16 = 9 as S16,
+        U32 = 10 as U32, S32 = 11 as S32, U64 = 12 as U64, S64 = 13 as S64,
     }
 
-    impl TryFrom<i32> for Tag {
-        /// The rejected raw tag.
-        type Error = i32;
+    impl Tag {
+        pub fn fixed(self) -> Option<Integer> {
+            ((self as i32) >= U8).then_some(Integer(self as u8))
+        }
 
-        fn try_from(tag: i32) -> Result<Self, i32> {
-            Ok(match tag {
-                FLOAT => Self::Float,
-                SIGNED => Self::Signed,
-                UNSIGNED => Self::Unsigned,
-                UNDEFINED => Self::Undefined,
-                NULL => Self::Null,
-                OMITTED => Self::Omitted,
-                U8 => Self::U8,
-                S8 => Self::S8,
-                U16 => Self::U16,
-                S16 => Self::S16,
-                U32 => Self::U32,
-                S32 => Self::S32,
-                U64 => Self::U64,
-                S64 => Self::S64,
-                other => return Err(other),
-            })
+        pub fn integer_signed(self) -> Option<bool> {
+            match self {
+                Self::Float | Self::Null | Self::Undefined | Self::Omitted => None,
+                _ => Some(self as i32 & 1 != 0),
+            }
+        }
+    }
+
+    /// The eight fixed-width integer carriers, in ABI tag order.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Integer(u8);
+
+    impl Integer {
+        pub const U8: Self = Self(U8 as u8);
+        pub const I8: Self = Self(S8 as u8);
+        pub const U16: Self = Self(U16 as u8);
+        pub const I16: Self = Self(S16 as u8);
+        pub const U32: Self = Self(U32 as u8);
+        pub const I32: Self = Self(S32 as u8);
+        pub const U64: Self = Self(U64 as u8);
+        pub const I64: Self = Self(S64 as u8);
+
+        pub fn new(bits: u32, signed: bool) -> Option<Self> {
+            let unsigned = match bits {
+                8 => U8,
+                16 => U16,
+                32 => U32,
+                64 => U64,
+                _ => return None,
+            };
+            Some(Self(unsigned as u8 + u8::from(signed)))
+        }
+
+        pub fn tag(self) -> i32 {
+            i32::from(self.0)
+        }
+        pub fn bits(self) -> u32 {
+            8 << ((self.0 - U8 as u8) / 2)
+        }
+        pub fn signed(self) -> bool {
+            self.0 & 1 != 0
+        }
+
+        pub fn common(self, other: Self) -> Self {
+            let wider = self.max(other);
+            if self.signed() == other.signed() {
+                return wider;
+            }
+            let unsigned = if self.signed() { other } else { self };
+            if unsigned == Self::U64 {
+                return unsigned;
+            }
+            // The next wider signed tag follows the unsigned tag by three.
+            wider.max(Self(unsigned.0 + 3))
+        }
+
+        pub fn register(self) -> Self {
+            self.max(if self.signed() { Self::I32 } else { Self::U32 })
+        }
+
+        pub fn unconstrained(self) -> Self {
+            if self.signed() { Self::I64 } else { Self::U64 }
         }
     }
 }

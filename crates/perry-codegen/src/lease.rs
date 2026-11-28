@@ -20,10 +20,8 @@ use perry_mir::{
     WrapOp,
 };
 use pliron::{
-    basic_block::BasicBlock,
-    builtin::{op_interfaces::BranchOpInterface, ops::FuncOp},
+    builtin::ops::FuncOp,
     context::{Context, Ptr},
-    op::op_cast,
     operation::Operation,
     value::Value,
 };
@@ -43,7 +41,7 @@ pub(crate) fn leased(
     function: &FuncOp,
     live: &perry_mir::LiveValues,
 ) -> HashSet<Ptr<Operation>> {
-    let ops = crate::analysis::function_ops(ctx, function);
+    let ops = perry_mir::operations(ctx, function);
     let mut leased = HashSet::new();
     for class in CLASSES {
         let members: Vec<_> = ops
@@ -118,17 +116,8 @@ fn derived(ctx: &Context, members: &[Ptr<Operation>]) -> Option<HashSet<Value>> 
                 }
             } else {
                 // A branch passes the value to a block argument; anything else lets it escape.
-                let dynamic = Operation::get_op_dyn(user, ctx);
-                let branch = op_cast::<dyn BranchOpInterface>(dynamic.as_ref())?;
-                let index = r#use.find_index(ctx);
-                let (block, argument): (Ptr<BasicBlock>, usize) =
-                    (0..operation.get_num_successors()).find_map(|succ| {
-                        let range = branch.successor_operand_range(ctx, succ);
-                        range
-                            .contains(&index)
-                            .then(|| (operation.get_successor(succ), index - range.start))
-                    })?;
-                work.push(block.deref(ctx).get_argument(argument));
+                let edge = pliron_control::forwarded_operand(ctx, user, r#use.find_index(ctx))?;
+                work.push(edge.argument);
             }
         }
     }

@@ -18,7 +18,7 @@ use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal, internal};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
-    ImportSection, Module, TypeSection,
+    ImportSection, Module,
 };
 use wasmparser::Validator;
 
@@ -26,23 +26,27 @@ pub(crate) mod canonical;
 mod data_relocations;
 pub(crate) mod libraries;
 mod parsed;
+mod signatures;
 #[cfg(test)]
 mod tests;
-mod type_compaction;
 
 use libraries::{HelperMemory, Library, LibraryId, Relocations, align_to};
-pub(crate) use type_compaction::compact;
+use signatures::{Signatures, TypeIndices};
 
 pub(super) fn wasm_err(err: impl fmt::Display) -> Diagnostic {
     internal!("{err}")
 }
 
 struct CoreRelocations<'a> {
+    types: TypeIndices<'a>,
     functions: &'a BTreeMap<u32, u32>,
 }
 
 impl Reencode for CoreRelocations<'_> {
     type Error = String;
+    fn type_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
+        self.types.resolve(index)
+    }
     fn function_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
         self.functions.get(&index).copied().ok_or_else(|| {
             reencode::Error::UserError(format!("unmapped core function index {index}"))
@@ -126,6 +130,16 @@ pub(crate) fn link_helpers_with(
     if helper_imports.is_empty() && !export_realloc && !renamed {
         return Ok((core_wasm, 0));
     }
+    let mut signatures = Signatures::default();
+    let mut core_type_indices = vec![None; core.types.len()];
+    let mut types = TypeIndices {
+        definitions: &core.types,
+        mapped: &mut core_type_indices,
+        output: &mut signatures,
+    };
+    for (_, _, ty) in &mut external_imports {
+        *ty = types.resolve(*ty).map_err(wasm_err)?;
+    }
     ensure_internal!(
         core.other_imports.is_empty(),
         "core helper linking requires defined memory, tables and globals"
@@ -141,16 +155,12 @@ pub(crate) fn link_helpers_with(
         lib: Library<'static>,
         reachable: BTreeSet<u32>,
         helper_defined_indices: BTreeMap<u32, u32>,
-        type_base: u32,
+        type_indices: Vec<Option<u32>>,
         entries: BTreeSet<&'a str>,
         stubs: Vec<(u32, u32)>,
         helper_calls: Vec<(u32, (LibraryId, &'static str))>,
     }
 
-    let mut new_types = TypeSection::new();
-    for ty in &core.types {
-        new_types.ty().func_type(ty);
-    }
     let mut pending = helper_imports
         .iter()
         .map(|(_, entry, _)| Ok((LibraryId::for_entry(entry)?, *entry)))
@@ -170,14 +180,11 @@ pub(crate) fn link_helpers_with(
                 let mut lib = Library::parse(id.for_memory(collectible))?;
                 lib.external_callbacks =
                     matches!(id, LibraryId::P2 | LibraryId::P2Io | LibraryId::P2Http);
-                let type_base = new_types.len();
-                for ty in &lib.module.types {
-                    new_types.ty().func_type(ty);
-                }
+                let type_indices = vec![None; lib.module.types.len()];
                 entry.insert(PreparedLibrary {
                     id,
                     lib,
-                    type_base,
+                    type_indices,
                     reachable: BTreeSet::new(),
                     helper_defined_indices: BTreeMap::new(),
                     entries: BTreeSet::new(),
@@ -194,9 +201,15 @@ pub(crate) fn link_helpers_with(
             .reachable([entry], &BTreeSet::new(), &prep.reachable)?;
         for &orig in reachable.range(..prep.lib.module.imports.len() as u32) {
             let (module, name, ty) = prep.lib.module.imports[orig as usize];
+            let mut type_indices = TypeIndices {
+                definitions: &prep.lib.module.types,
+                mapped: &mut prep.type_indices,
+                output: &mut signatures,
+            };
             // A byte-stream placeholder can resolve to the same import as an unused console branch.
             if stub_runtime_import(module, name) {
-                prep.stubs.push((orig, prep.type_base + ty));
+                prep.stubs
+                    .push((orig, type_indices.resolve(ty).map_err(wasm_err)?));
                 continue;
             }
             if let Some(helper) = runtime.helper(module, name) {
@@ -230,7 +243,11 @@ pub(crate) fn link_helpers_with(
             {
                 Some(index) => index,
                 None => {
-                    external_imports.push((module, name, prep.type_base + ty));
+                    external_imports.push((
+                        module,
+                        name,
+                        type_indices.resolve(ty).map_err(wasm_err)?,
+                    ));
                     external_imports.len() - 1
                 }
             };
@@ -383,20 +400,28 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    let mut core_reloc = CoreRelocations {
-        functions: &old_to_new_func_index,
-    };
     core.emit_functions(
         &mut new_functions,
         &mut new_code,
         0..core.bodies.len(),
-        &mut core_reloc,
+        &mut CoreRelocations {
+            functions: &old_to_new_func_index,
+            types: TypeIndices {
+                definitions: &core.types,
+                mapped: &mut core_type_indices,
+                output: &mut signatures,
+            },
+        },
     )?;
-    for (prep, placement) in prepared_libs.iter().zip(&lib_placements) {
+    for (prep, placement) in prepared_libs.iter_mut().zip(&lib_placements) {
         let mut relocation = Relocations {
             functions: &prep.helper_defined_indices,
             globals: &prep.lib.globals,
-            type_base: prep.type_base,
+            types: TypeIndices {
+                definitions: &prep.lib.module.types,
+                mapped: &mut prep.type_indices,
+                output: &mut signatures,
+            },
             memory_base: placement.memory_base,
             stack_global: stack_global_index,
             table_base: placement.table_base,
@@ -434,8 +459,7 @@ pub(crate) fn link_helpers_with(
     }
 
     let init_func_idx = if !helper_inits.is_empty() {
-        let empty_ty_idx = new_types.len();
-        new_types.ty().function(vec![], vec![]);
+        let empty_ty_idx = signatures.intern(&wasm_encoder::FuncType::new([], []));
         new_functions.function(empty_ty_idx);
         let mut init_fn = wasm_encoder::Function::new(vec![]);
         for &fn_idx in &helper_inits {
@@ -457,9 +481,14 @@ pub(crate) fn link_helpers_with(
         None
     };
 
-    // 5. Construct final linked module
-    let mut module = Module::new();
-    module.section(&new_types);
+    let mut core_reloc = CoreRelocations {
+        functions: &old_to_new_func_index,
+        types: TypeIndices {
+            definitions: &core.types,
+            mapped: &mut core_type_indices,
+            output: &mut signatures,
+        },
+    };
 
     let mut new_imports = ImportSection::new();
     for (module_name, field_name, ty_idx) in &external_imports {
@@ -469,12 +498,6 @@ pub(crate) fn link_helpers_with(
             wasm_encoder::EntityType::Function(*ty_idx),
         );
     }
-    if !new_imports.is_empty() {
-        module.section(&new_imports);
-    }
-
-    module.section(&new_functions);
-
     let mut new_tables = wasm_encoder::TableSection::new();
     for (index, table) in core.tables.iter().cloned().flatten().enumerate() {
         let mut table = table.map_err(wasm_err)?;
@@ -507,12 +530,9 @@ pub(crate) fn link_helpers_with(
             shared: false,
         });
     }
-    if !new_tables.is_empty() {
-        module.section(&new_tables);
-    }
 
+    let mut new_mems = wasm_encoder::MemorySection::new();
     if let Some(memories) = core.memories.take() {
-        let mut new_mems = wasm_encoder::MemorySection::new();
         for (index, memory) in memories.into_iter().enumerate() {
             let mut memory = memory.map_err(wasm_err)?;
             if index == 0 && needs_stack {
@@ -520,14 +540,12 @@ pub(crate) fn link_helpers_with(
             }
             new_mems.memory(core_reloc.memory_type(memory).map_err(wasm_err)?);
         }
-        module.section(&new_mems);
     }
+    let mut new_tags = wasm_encoder::TagSection::new();
     if let Some(tags) = core.tags.take() {
-        let mut new_tags = wasm_encoder::TagSection::new();
         core_reloc
             .parse_tag_section(&mut new_tags, tags)
             .map_err(wasm_err)?;
-        module.section(&new_tags);
     }
     let mut new_globs = GlobalSection::new();
     if let Some(globals) = core.globals.take() {
@@ -545,9 +563,6 @@ pub(crate) fn link_helpers_with(
             &ConstExpr::i32_const(stack_top as i32),
         );
     }
-    if !new_globs.is_empty() {
-        module.section(&new_globs);
-    }
 
     // Exports
     let mut new_exports = ExportSection::new();
@@ -563,23 +578,6 @@ pub(crate) fn link_helpers_with(
             entry_index[&(LibraryId::Runtime, "perry_cabi_realloc")],
         );
     }
-    module.section(&new_exports);
-
-    // Start
-    if let Some(init_idx) = init_func_idx {
-        module.section(&wasm_encoder::StartSection {
-            function_index: init_idx,
-        });
-    } else if let Some(start_func) = core.start {
-        let new_start_func = old_to_new_func_index
-            .get(&start_func)
-            .copied()
-            .unwrap_or(start_func);
-        module.section(&wasm_encoder::StartSection {
-            function_index: new_start_func,
-        });
-    }
-
     // Elements
     let mut new_elems = wasm_encoder::ElementSection::new();
     if let Some(elements) = core.elements.take() {
@@ -597,9 +595,6 @@ pub(crate) fn link_helpers_with(
                 );
             }
         }
-    }
-    if !new_elems.is_empty() {
-        module.section(&new_elems);
     }
 
     // Data
@@ -628,6 +623,36 @@ pub(crate) fn link_helpers_with(
                 append(offset, contents);
             }
         }
+    }
+    let mut module = Module::new();
+    module.section(&signatures.section);
+    if !new_imports.is_empty() {
+        module.section(&new_imports);
+    }
+    module.section(&new_functions);
+    if !new_tables.is_empty() {
+        module.section(&new_tables);
+    }
+    if !new_mems.is_empty() {
+        module.section(&new_mems);
+    }
+    if !new_tags.is_empty() {
+        module.section(&new_tags);
+    }
+    if !new_globs.is_empty() {
+        module.section(&new_globs);
+    }
+    module.section(&new_exports);
+    if let Some(start) = init_func_idx.or_else(|| {
+        core.start
+            .map(|i| old_to_new_func_index.get(&i).copied().unwrap_or(i))
+    }) {
+        module.section(&wasm_encoder::StartSection {
+            function_index: start,
+        });
+    }
+    if !new_elems.is_empty() {
+        module.section(&new_elems);
     }
     if core.data_count.is_some() {
         module.section(&wasm_encoder::DataCountSection {

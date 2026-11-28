@@ -1,6 +1,9 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
-use crate::hir_compat::{Locations, parse, pattern_bindings};
+use crate::{
+    hir_compat::Locations,
+    source::{parse, pattern_bindings},
+};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{
     Diagnostic, Result, bail_diag, bail_unsupported, codes, diag, ensure_unsupported, unsupported,
@@ -25,7 +28,7 @@ pub(crate) fn load<'s>(
     source: &'s str,
     file: &str,
     sources: &'s BTreeMap<String, String>,
-    foreign: &HashMap<String, crate::hir::Foreign>,
+    foreign: &HashMap<String, crate::wit::Foreign>,
 ) -> Result<Loaded<'s>> {
     let mut initial = parse(source, file)?;
     wit_imports(&mut initial, foreign, Path::new(file), sources);
@@ -41,7 +44,7 @@ pub(crate) fn load<'s>(
     if !needs_graph {
         let mut locations = crate::hir_compat::Locations::default();
         locations.add(PathBuf::from(file), source)?;
-        crate::engine::boundary::validate_ast(&initial, &locations)?;
+        crate::source::validate_ast(&initial, &locations)?;
         let mut exports = Exports::new();
         for item in &mut initial.body {
             if let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) = item {
@@ -89,7 +92,7 @@ pub(crate) fn load<'s>(
 /// SDK types are supplied from the selected WIT world, including in-memory test sources.
 fn wit_imports(
     module: &mut ast::Module,
-    foreign: &HashMap<String, crate::hir::Foreign>,
+    foreign: &HashMap<String, crate::wit::Foreign>,
     parent: &Path,
     sources: &BTreeMap<String, String>,
 ) {
@@ -102,9 +105,7 @@ fn wit_imports(
                     let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
                     let name: &str = imported.as_deref().unwrap_or(&named.local.sym);
                     (import.type_only || named.is_type_only)
-                        && (foreign
-                            .get(name)
-                            .is_some_and(|item| !matches!(item, crate::hir::Foreign::Function(_)))
+                        && (foreign.contains_key(name)
                             || matches!(name, "WitInput" | "WitResource"))
                 }
                 _ => false,
@@ -190,7 +191,7 @@ pub(crate) fn imports(module: &ast::Module) -> impl Iterator<Item = String> + '_
 
 struct Graph<'a, 'f> {
     sources: &'a BTreeMap<String, String>,
-    foreign: &'f HashMap<String, crate::hir::Foreign>,
+    foreign: &'f HashMap<String, crate::wit::Foreign<'f>>,
     loaded: BTreeMap<PathBuf, Exports>,
     active: BTreeSet<PathBuf>,
     body: Vec<ast::ModuleItem>,
@@ -241,7 +242,7 @@ impl Graph<'_, '_> {
         };
         let offset = self.locations.add(path.to_owned(), text)?;
         module.visit_mut_with(&mut Rebase(offset));
-        crate::engine::boundary::validate_ast(&module, &self.locations)?;
+        crate::source::validate_ast(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
             module.body.retain(|item| {
@@ -318,7 +319,7 @@ fn bind_module<'a>(
     let mut exports = Exports::new();
     let module_binding = |id: &ast::Ident| {
         ast::Ident::new(
-            crate::hir_compat::module_binding_name(index, &id.sym).into(),
+            crate::source::module_binding_name(index, &id.sym).into(),
             id.span,
             id.ctxt,
         )
@@ -331,7 +332,7 @@ fn bind_module<'a>(
             }))
             | ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
                 for id in declared(decl)? {
-                    if crate::hir_compat::is_reserved_binding(&id.sym) {
+                    if crate::source::is_reserved_binding(&id.sym) {
                         return Err(locations
                             .annotate(unsupported!("Reserved compiler name in source"), id.span));
                     }
@@ -461,7 +462,7 @@ fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
         ast::Decl::Var(var) => {
             let mut names = Vec::new();
             for declaration in &var.decls {
-                pattern_bindings(&declaration.name, false, &mut |id, _| names.push(id));
+                pattern_bindings(&declaration.name, &mut |id, _| names.push(id));
             }
             names
         }

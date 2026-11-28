@@ -39,7 +39,7 @@ use pliron::{
     identifier::Identifier,
     linked_list::ContainsLinkedList,
     operation::Operation,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, TypedHandle},
 };
 use std::collections::HashMap;
 use wasm_encoder::{
@@ -48,36 +48,17 @@ use wasm_encoder::{
     TypeSection, ValType,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EmitError {
+    #[error("function {function}: control flow is irreducible at block {block}")]
     Irreducible { function: String, block: String },
+    #[error("function {function}: {op} is not part of the wasm dialect")]
     UnsupportedOp { function: String, op: String },
+    #[error("{0} has a type that is not a Wasm value type")]
     ValueType(String),
+    #[error("function {function}: {message}")]
     Malformed { function: String, message: String },
 }
-
-impl core::fmt::Display for EmitError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Irreducible { function, block } => {
-                write!(
-                    f,
-                    "function {function}: control flow is irreducible at block {block}"
-                )
-            }
-            Self::UnsupportedOp { function, op } => {
-                write!(
-                    f,
-                    "function {function}: {op} is not part of the wasm dialect"
-                )
-            }
-            Self::ValueType(item) => write!(f, "{item} has a type that is not a Wasm value type"),
-            Self::Malformed { function, message } => write!(f, "function {function}: {message}"),
-        }
-    }
-}
-
-impl core::error::Error for EmitError {}
 
 type EmitResult<T> = Result<T, EmitError>;
 
@@ -166,13 +147,22 @@ pub fn emit_module(ctx: &Context, module: &ModuleOp, options: &EmitOptions) -> E
     let mut import_section = ImportSection::new();
     for (index, import) in imports.iter().enumerate() {
         let symbol = import.get_symbol_name(ctx);
-        let sig = signature(ctx, import.get_type(ctx), symbol.as_ref())?;
+        let ty = import.signature(ctx).ok_or_else(|| EmitError::Malformed {
+            function: symbol.to_string(),
+            message: "missing or invalid import signature".into(),
+        })?;
+        let sig = signature(ctx, ty.into(), symbol.as_ref())?;
         let ty = intern(&sig);
-        import_section.import(
-            &import.module(ctx),
-            &import.name(ctx),
-            EntityType::Function(ty),
-        );
+        let (Some(module), Some(name)) = (
+            import.get_attr_wasm_import_module(ctx),
+            import.get_attr_wasm_import_name(ctx),
+        ) else {
+            return Err(EmitError::Malformed {
+                function: symbol.to_string(),
+                message: "missing import module or field name".into(),
+            });
+        };
+        import_section.import(module.as_str(), name.as_str(), EntityType::Function(ty));
         names.append(index as u32, symbol.as_ref());
         function_index.insert(symbol, index as u32);
     }

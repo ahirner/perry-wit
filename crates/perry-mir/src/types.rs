@@ -18,6 +18,7 @@ use pliron::{
 mod kinds;
 pub use kinds::*;
 mod records;
+pub use records::RecordLayouts;
 
 /// `ty` as a `T` when it is one. Unlike [TypedHandle::from_handle], a mismatch does not print
 /// both types into an error, so this is the type test for hot paths.
@@ -27,6 +28,48 @@ pub fn typed<T: Type>(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<T>> {
     } else {
         None
     }
+}
+
+/// Each reachable MIR storage type once, including roots and opaque record declarations.
+pub fn nested_types(
+    ctx: &Context,
+    roots: impl IntoIterator<Item = TypeHandle>,
+) -> impl Iterator<Item = TypeHandle> + '_ {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending: Vec<_> = roots.into_iter().filter(|ty| seen.insert(*ty)).collect();
+    std::iter::from_fn(move || {
+        let ty = pending.pop()?;
+        if let Some(children) = type_children(&*ty.deref(ctx)) {
+            pending.extend(children.filter(|child| seen.insert(*child)));
+        }
+        Some(ty)
+    })
+}
+
+/// Immediate storage types. A forward-declared record has unknown children.
+pub(crate) fn type_children(ty: &dyn Type) -> Option<impl Iterator<Item = TypeHandle> + '_> {
+    let fields = match ty.downcast_ref::<RecordType>() {
+        Some(record) => record.fields.as_deref()?,
+        None => &[],
+    };
+    let cases = ty
+        .downcast_ref::<VariantType>()
+        .map_or(&[][..], VariantType::cases);
+    let payload = ty
+        .downcast_ref::<ValueUnionType>()
+        .map(ValueUnionType::variants)
+        .or_else(|| ty.downcast_ref::<OptionalType>().map(OptionalType::value))
+        .or_else(|| ty.downcast_ref::<ArrayType>().map(ArrayType::element))
+        .or_else(|| ty.downcast_ref::<PromiseType>().map(PromiseType::value))
+        .or_else(|| ty.downcast_ref::<SettledType>().map(SettledType::value))
+        .or_else(|| ty.downcast_ref::<SlotType>().map(SlotType::value));
+    Some(
+        fields
+            .iter()
+            .map(|(_, field)| *field)
+            .chain(cases.iter().filter_map(|(_, payload)| *payload))
+            .chain(payload),
+    )
 }
 
 macro_rules! record_kinds {
@@ -73,6 +116,10 @@ pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
         && !ty.is::<NumericType>()
 }
 
+/// Field names of a TypeScript tagged result, in WIT case order.
+pub const RESULT_TAG: &str = "ok";
+pub const RESULT_PAYLOADS: [&str; 2] = ["value", "error"];
+
 /// A closed-shape record, referenced by value of this type.
 ///
 /// Records are nominal and uniqued by name, so recursive shapes can declare an opaque record
@@ -86,34 +133,19 @@ pub struct RecordType {
     kind: RecordKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum RecordErr {
+    #[error("unknown record kind {0}")]
     UnknownKind(String),
+    #[error("record {0} already exists with different fields")]
     Mismatch(String),
+    #[error("record {0} has duplicate field {1}")]
     DuplicateField(String, String),
+    #[error("record {0} is used before its fields are known")]
     Opaque(String),
+    #[error("a variant needs distinct literal tags")]
     InvalidVariant,
 }
-
-impl core::fmt::Display for RecordErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::UnknownKind(kind) => write!(f, "unknown record kind {kind}"),
-            Self::Mismatch(record) => {
-                write!(f, "record {record} already exists with different fields")
-            }
-            Self::DuplicateField(record, field) => {
-                write!(f, "record {record} has duplicate field {field}")
-            }
-            Self::Opaque(record) => {
-                write!(f, "record {record} is used before its fields are known")
-            }
-            Self::InvalidVariant => f.write_str("a variant needs distinct literal tags"),
-        }
-    }
-}
-
-impl core::error::Error for RecordErr {}
 
 impl RecordType {
     /// Get or create the record `name`. Supplying `fields` defines an opaque record, and
@@ -173,6 +205,16 @@ impl RecordType {
 
     pub fn name(&self) -> &Identifier {
         &self.name
+    }
+
+    /// An object, tuple, or dictionary entry whose fields represent user data.
+    pub fn data_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<Self>> {
+        typed::<Self>(ctx, ty).filter(|r| {
+            matches!(
+                r.deref(ctx).kind,
+                RecordKind::Object | RecordKind::Tuple | RecordKind::DictionaryEntry
+            )
+        })
     }
 
     pub fn is_tuple(&self) -> bool {
@@ -331,78 +373,39 @@ impl Parsable for RecordType {
     }
 }
 
-/// Storage for one mutable local prior to SSA construction by pliron `mem2reg`.
-#[pliron_type(
-    name = "perry.slot",
-    generate_get = true,
-    format = "`<` $value `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct SlotType {
-    value: TypeHandle,
+macro_rules! payload_type {
+    ($(#[$doc:meta])* $ty:ident($name:literal, $accessor:ident)) => {
+        $(#[$doc])*
+        #[pliron_type(name = $name, generate_get = true, format = "`<` $payload `>`", verifier = "succ")]
+        #[derive(Hash, PartialEq, Eq, Debug)]
+        pub struct $ty {
+            payload: TypeHandle,
+        }
+
+        impl $ty {
+            pub fn $accessor(&self) -> TypeHandle {
+                self.payload
+            }
+        }
+    };
 }
 
-impl SlotType {
-    pub fn value(&self) -> TypeHandle {
-        self.value
-    }
-}
-
-/// A dense, growable array of a single element type.
-#[pliron_type(
-    name = "perry.array",
-    generate_get = true,
-    format = "`<` $element `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ArrayType {
-    element: TypeHandle,
-}
-
-impl ArrayType {
-    pub fn element(&self) -> TypeHandle {
-        self.element
-    }
-}
-
-/// The eventual value of an async call, scoped to its export task.
-#[pliron_type(
-    name = "perry.promise",
-    generate_get = true,
-    format = "`<` $value `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct PromiseType {
-    value: TypeHandle,
-}
-
-impl PromiseType {
-    pub fn value(&self) -> TypeHandle {
-        self.value
-    }
-}
-
-/// An element of `Promise.allSettled`'s result: the settled input promise itself, read as
-/// `{ status, value, reason }` (`perry.settled_field`).
-#[pliron_type(
-    name = "perry.settled",
-    generate_get = true,
-    format = "`<` $value `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct SettledType {
-    value: TypeHandle,
-}
-
-impl SettledType {
-    pub fn value(&self) -> TypeHandle {
-        self.value
-    }
-}
+payload_type!(
+    /// Storage for one mutable local prior to SSA construction by pliron `mem2reg`.
+    SlotType("perry.slot", value)
+);
+payload_type!(
+    /// A dense, growable array of a single element type.
+    ArrayType("perry.array", element)
+);
+payload_type!(
+    /// The eventual value of an async call, scoped to its export task.
+    PromiseType("perry.promise", value)
+);
+payload_type!(
+    /// The input promise of a `Promise.allSettled` result, read by `perry.settled_field`.
+    SettledType("perry.settled", value)
+);
 
 /// A value with one or both absence states (`null`, `undefined`). Single-absence references
 /// use a null pointer, and values admitting both states reserve a second unboxed sentinel.

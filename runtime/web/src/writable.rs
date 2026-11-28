@@ -47,10 +47,7 @@ pub(crate) extern "C" fn web_writable_get_writer(stream: *mut u8) -> *mut u8 {
     // SAFETY: compiled code passes writable streams.
     unsafe {
         if (*stream).locked != 0 {
-            perry_rt_sys::raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("Invalid state: WritableStream is locked"),
-            );
+            perry_rt_sys::raise_static!(TYPE_ERROR, "Invalid state: WritableStream is locked");
             return core::ptr::null_mut();
         }
         (*stream).locked = 1;
@@ -73,23 +70,19 @@ fn bound(writer: *mut u8, promise: *mut u8) -> Option<&'static mut Writable> {
     // SAFETY: compiled code passes writers; streams outlive them.
     unsafe {
         if (*writer).released != 0 {
-            reject_with(
+            perry_rt_sys::reject_static!(
                 promise,
                 TYPE_ERROR,
-                from_static(perry_rt_sys::static_text!(
-                    "Invalid state: Writer is not bound to a WritableStream"
-                )),
+                "Invalid state: Writer is not bound to a WritableStream"
             );
             return None;
         }
         let stream = &mut *(*writer).stream;
         if stream.closed != 0 {
-            reject_with(
+            perry_rt_sys::reject_static!(
                 promise,
                 TYPE_ERROR,
-                from_static(perry_rt_sys::static_text!(
-                    "Invalid state: WritableStream is closed"
-                )),
+                "Invalid state: WritableStream is closed"
             );
             return None;
         }

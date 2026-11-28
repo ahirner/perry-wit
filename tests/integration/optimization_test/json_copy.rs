@@ -15,6 +15,8 @@ export function run(x: number) {
     const text = JSON.stringify(src);
     other.a = 99;
     const copy = JSON.parse<Item>(text);
+    const second = JSON.parse<Item>(JSON.stringify(copy));
+    second.tags.push("second");
     const mutated: Item = { a: 10, tags: [] };
     const mText = JSON.stringify(mutated);
     mutated.a = 20;
@@ -29,7 +31,7 @@ export function run(x: number) {
     } catch (_e) {
         threw = true;
     }
-    return negZeroFixed && threw && !("b" in copy) && preserved.a === 10 ? copy.tags.length : -1;
+    return negZeroFixed && threw && !("b" in copy) && preserved.a === 10 && second.tags.length === 2 ? copy.tags.length : -1;
 }
 "#,
         "func(x:f64)->s32",

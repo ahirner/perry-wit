@@ -64,13 +64,16 @@ pub enum FactLimits {
     Narrow,
 }
 
-impl FactLimits {
-    /// Run `compile` under these limits.
-    fn apply<R>(self, compile: impl FnOnce() -> R) -> R {
-        match self {
-            Self::Default => compile(),
-            Self::Summarized => perry_mir::with_fact_limits(1, 1, compile),
-            Self::Narrow => perry_mir::with_fact_limits(2, 2, compile),
+impl From<FactLimits> for perry_mir::FactLimits {
+    fn from(limits: FactLimits) -> Self {
+        let budget = match limits {
+            FactLimits::Default => return Self::default(),
+            FactLimits::Summarized => 1,
+            FactLimits::Narrow => 2,
+        };
+        Self {
+            max_origins: budget,
+            max_precise_contexts: budget,
         }
     }
 }

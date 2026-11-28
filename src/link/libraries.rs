@@ -5,53 +5,50 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{parsed::ParsedModule, wasm_err};
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, ensure_internal, internal};
-use pliron::graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order};
 use wasm_encoder::Instruction;
 use wasm_encoder::reencode::{self, Reencode};
 use wasmparser::{Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Operator, TypeRef};
 
-pub(crate) const FETCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/fetch.wasm"));
-pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/text.wasm"));
-pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/time.wasm"));
-const JSON_GRAPH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-graph.wasm"));
-const JSON_CURSOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-cursor.wasm"));
-const JSON_COPY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-copy.wasm"));
-pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json.wasm"));
-const NORMALIZATION: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/runtime/normalization.wasm"));
-const DECIMAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/decimal.wasm"));
-pub(crate) const NUMBER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/number.wasm"));
-pub(crate) const COLLECTIBLE_RUNTIME: &[u8] = include_bytes!(concat!(
+const COLLECTIBLE_RUNTIME: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/runtime/runtime-collectible.wasm"
 ));
-pub(crate) const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/runtime.wasm"));
-pub(crate) const STD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/std.wasm"));
-pub(crate) const FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/fs.wasm"));
-pub(crate) const WEB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/web.wasm"));
-const P2: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2.wasm"));
-const P2_IO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-io.wasm"));
-const P2_HTTP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-http.wasm"));
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum LibraryId {
-    P2,
-    P2Io,
-    P2Http,
-    Runtime,
-    Std,
-    Fs,
-    Web,
-    Fetch,
-    Text,
-    Normalization,
-    Json,
-    JsonGraph,
-    JsonCursor,
-    JsonCopy,
-    Time,
-    Number,
-    Decimal,
+macro_rules! libraries {
+    ($($variant:ident => $file:literal,)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub(crate) enum LibraryId {
+            $($variant,)*
+        }
+
+        impl LibraryId {
+            pub(crate) fn bytes(self) -> &'static [u8] {
+                match self {
+                    $(Self::$variant => include_bytes!(concat!(env!("OUT_DIR"), "/runtime/", $file)),)*
+                }
+            }
+        }
+    };
+}
+
+libraries! {
+    Runtime => "runtime.wasm",
+    P2 => "p2.wasm",
+    P2Io => "p2-io.wasm",
+    P2Http => "p2-http.wasm",
+    Std => "std.wasm",
+    Fs => "fs.wasm",
+    Web => "web.wasm",
+    Fetch => "fetch.wasm",
+    Text => "text.wasm",
+    Normalization => "normalization.wasm",
+    Json => "json.wasm",
+    JsonGraph => "json-graph.wasm",
+    JsonCursor => "json-cursor.wasm",
+    JsonCopy => "json-copy.wasm",
+    Time => "time.wasm",
+    Number => "number.wasm",
+    Decimal => "decimal.wasm",
 }
 
 impl LibraryId {
@@ -85,28 +82,6 @@ impl LibraryId {
             COLLECTIBLE_RUNTIME
         } else {
             self.bytes()
-        }
-    }
-
-    pub(crate) fn bytes(self) -> &'static [u8] {
-        match self {
-            Self::P2 => P2,
-            Self::P2Io => P2_IO,
-            Self::P2Http => P2_HTTP,
-            Self::Runtime => RUNTIME,
-            Self::Std => STD,
-            Self::Fs => FS,
-            Self::Web => WEB,
-            Self::Fetch => FETCH,
-            Self::Text => TEXT,
-            Self::Normalization => NORMALIZATION,
-            Self::Json => JSON,
-            Self::JsonGraph => JSON_GRAPH,
-            Self::JsonCursor => JSON_CURSOR,
-            Self::JsonCopy => JSON_COPY,
-            Self::Time => TIME,
-            Self::Number => NUMBER,
-            Self::Decimal => DECIMAL,
         }
     }
 }
@@ -195,57 +170,6 @@ pub(crate) struct Library<'a> {
     pub(crate) table_alignment: u32,
     /// The P2 scheduler invokes backend callbacks across library boundaries.
     pub(crate) external_callbacks: bool,
-}
-
-struct HelperCalls<'a> {
-    successors: &'a [Vec<usize>],
-    predecessors: Vec<Vec<usize>>,
-}
-
-impl<'a> HelperCalls<'a> {
-    fn new(successors: &'a [Vec<usize>]) -> Self {
-        let mut predecessors = vec![Vec::new(); successors.len()];
-        for (caller, calls) in successors.iter().enumerate() {
-            for &callee in calls {
-                predecessors[callee].push(caller);
-            }
-        }
-        Self {
-            successors,
-            predecessors,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct FunctionIndex(usize);
-
-impl HasLabel<()> for FunctionIndex {
-    fn label(&self, _: &()) -> String {
-        self.0.to_string()
-    }
-}
-
-impl ControlFlowGraph<()> for HelperCalls<'_> {
-    type Node = FunctionIndex;
-    fn num_successors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.successors[node.0].len()
-    }
-    fn get_successor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(self.successors[node.0][index])
-    }
-    fn num_predecessors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.predecessors[node.0].len()
-    }
-    fn get_predecessor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(self.predecessors[node.0][index])
-    }
-    fn entry_node(&self, _: &()) -> Option<FunctionIndex> {
-        (!self.successors.is_empty()).then_some(FunctionIndex(0))
-    }
-    fn nodes<'a>(&'a self, _: &'a ()) -> Box<dyn Iterator<Item = FunctionIndex> + 'a> {
-        Box::new((0..self.successors.len()).map(FunctionIndex))
-    }
 }
 
 impl<'a> Library<'a> {
@@ -420,23 +344,20 @@ impl<'a> Library<'a> {
             graph.push(calls);
             frames.push(frame_bytes);
         }
-        let graph = HelperCalls::new(&graph);
         let mut depths = vec![0_u32; frames.len()];
-        for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
-            if component.is_cyclic && component.nodes.iter().any(|node| frames[node.0] != 0) {
+        for component in pliron_control::graph::components(&graph).into_iter().rev() {
+            if component.is_cyclic && component.nodes.iter().any(|node| frames[*node] != 0) {
                 return None;
             }
             let mut depth = 0_u32;
             for node in &component.nodes {
-                let callee_depth = graph.successors[node.0]
-                    .iter()
-                    .try_fold(0_u32, |deepest, &callee| {
-                        Some(deepest.max(*depths.get(callee)?))
-                    })?;
-                depth = depth.max(frames[node.0].checked_add(callee_depth)?);
+                let callee_depth = graph[*node].iter().try_fold(0_u32, |deepest, &callee| {
+                    Some(deepest.max(*depths.get(callee)?))
+                })?;
+                depth = depth.max(frames[*node].checked_add(callee_depth)?);
             }
             for node in component.nodes {
-                depths[node.0] = depth;
+                depths[node] = depth;
             }
         }
         let deepest = depths.into_iter().max().unwrap_or(0);
@@ -747,7 +668,7 @@ impl<'a> Library<'a> {
 pub(crate) struct Relocations<'a> {
     pub(crate) functions: &'a BTreeMap<u32, u32>,
     pub(crate) globals: &'a [Global],
-    pub(crate) type_base: u32,
+    pub(super) types: super::TypeIndices<'a>,
     pub(crate) memory_base: u32,
     pub(crate) stack_global: u32,
     pub(crate) table_base: u32,
@@ -762,7 +683,7 @@ impl Reencode for Relocations<'_> {
         })
     }
     fn type_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
-        Ok(self.type_base + index)
+        self.types.resolve(index)
     }
     fn table_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
         if index == 0 {
@@ -886,15 +807,15 @@ mod tests {
     #[test]
     fn helper_libraries_have_checked_small_stacks() {
         for (name, bytes) in [
-            ("time", TIME),
-            ("number", NUMBER),
-            ("runtime", RUNTIME),
+            ("time", LibraryId::Time.bytes()),
+            ("number", LibraryId::Number.bytes()),
+            ("runtime", LibraryId::Runtime.bytes()),
             ("runtime_collectible", COLLECTIBLE_RUNTIME),
-            ("fs", FS),
-            ("web", WEB),
-            ("json", JSON),
-            ("std", STD),
-            ("text", TEXT),
+            ("fs", LibraryId::Fs.bytes()),
+            ("web", LibraryId::Web.bytes()),
+            ("json", LibraryId::Json.bytes()),
+            ("std", LibraryId::Std.bytes()),
+            ("text", LibraryId::Text.bytes()),
         ] {
             let library = Library::parse(bytes).unwrap();
             assert!(

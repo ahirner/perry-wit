@@ -120,10 +120,7 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     });
     let mut preparation = Passes::default();
     preparation.add_pass(Mem2RegPass);
-    preparation.add_pass(FnPass(
-        "prove-optional-reads",
-        crate::receivers::prove_optional_reads,
-    ));
+    preparation.add_pass(FnPass("prove-receivers", crate::receivers::prove_receivers));
     preparation.add_pass(FnPass(
         "normalize-json-copy",
         crate::json_copy::normalize_json_copy,
@@ -163,6 +160,10 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     ));
     cleanup.add_pass(Mem2RegPass);
     cleanup.add_pass(DCEPass);
+    cleanup.add_pass(PassWrapper::new(
+        "fold-counted-loops",
+        crate::counted_loops::Fold,
+    ));
     cleanup.add_pass(SimplifyCFGPass);
     let mut rounds = run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 
@@ -187,7 +188,12 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     rounds += run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 
     let mut ownership = Passes::default();
-    ownership.add_pass(FnPass("owned-append", crate::append::run));
+    ownership.add_pass(FnPass("fuse-array-concats", |root, ctx, _| {
+        let mut result = PassResult::default();
+        result.ir_changed = crate::append::fuse_arrays(root, ctx).into();
+        Ok(result)
+    }));
+    ownership.add_pass(FnPass("owned-append", crate::append::reuse));
     ownership.add_pass(PassWrapper::new(
         "scalar-characters",
         crate::characters::ScalarizeCharacters::default(),

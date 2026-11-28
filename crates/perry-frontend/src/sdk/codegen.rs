@@ -3,10 +3,8 @@
 //! Generates idiomatic, strongly-typed TypeScript definitions for WIT worlds,
 //! exported functions, records, variants, enums, and imported interfaces.
 
-use perry_contract::names::{
-    TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children,
-};
-use perry_contract::types::{Contract, Input, convert};
+use perry_contract::names::{TsNames, to_camel_case, to_pascal_case};
+use perry_contract::types::{Contract, Input, Scalar, convert};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, codes};
 use std::{collections::HashSet, fmt::Write as _};
@@ -16,9 +14,15 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
     convert(
         names.resolve,
         input,
-        &|id| names.name(id),
-        &|contract| match contract {
-            Contract::Scalar(ty) => scalar_type(ty).into(),
+        &mut (),
+        &|(), id| names.name(id),
+        &|(), contract| match contract {
+            Contract::Alias(ty) => ty,
+            Contract::Scalar(Scalar::Bool) => "boolean".into(),
+            Contract::Scalar(Scalar::Integer(domain)) if domain.bits() == 64 => "bigint".into(),
+            Contract::Scalar(_) => "number".into(),
+            Contract::String | Contract::Char => "string".into(),
+            Contract::ErrorContext => "Error | unknown".into(),
             Contract::Resource { id, .. } => names.name(id).unwrap_or_else(|| "unknown".into()),
             Contract::Bytes => "Uint8Array".into(),
             Contract::ByteStream => "ReadableStream<Uint8Array>".into(),
@@ -30,7 +34,7 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
                 format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
             }
             Contract::Tuple(items) => {
-                format!("[{}]", items.collect::<Vec<_>>().join(", "))
+                format!("[{}]", items.join(", "))
             }
             Contract::Record(fields) => {
                 let mut out = String::from("{\n");
@@ -40,11 +44,13 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
                 out.push('}');
                 out
             }
-            Contract::Enum(cases) => cases
-                .map(|name| format!("\"{name}\""))
+            Contract::Enum(e) => e
+                .cases
+                .iter()
+                .map(|case| format!("\"{}\"", case.name))
                 .collect::<Vec<_>>()
                 .join(" | "),
-            Contract::Variant(cases) => {
+            Contract::Variant(_, cases) => {
                 let mut out = String::new();
                 for (name, payload) in cases {
                     let _ = write!(out, "\n  | {{ tag: \"{name}\"");
@@ -61,15 +67,10 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
 }
 
 fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
-    let Type::Id(id) = ty else { return false };
-    if matches!(resolve.types[*id].kind, TypeDefKind::List(Type::U8)) {
-        return true;
-    }
-    let mut found = false;
-    visit_type_children(&resolve.types[*id].kind, |ty| {
-        found = found || has_bytes(resolve, ty);
-    });
-    found
+    let mut live = wit_parser::LiveTypes::default();
+    live.add_type(resolve, ty);
+    live.iter()
+        .any(|id| matches!(resolve.types[id].kind, TypeDefKind::List(Type::U8)))
 }
 fn outbound_ts(names: &TsNames<'_>, ty: &Type) -> String {
     let ordinary = type_to_ts(names, Input::Reference(*ty));
@@ -254,33 +255,20 @@ pub(super) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
     let names = &TsNames::new(resolve, world);
     let mut out = String::new();
     let mut emitted = HashSet::new();
-    for (imported, (key, item)) in world
-        .imports
-        .iter()
-        .map(|item| (true, item))
-        .chain(world.exports.iter().map(|item| (false, item)))
+    for (imported, (key, id)) in [(true, &world.imports), (false, &world.exports)]
+        .into_iter()
+        .flat_map(|(imported, items)| {
+            perry_contract::world_interfaces(items).map(move |entry| (imported, entry))
+        })
     {
-        let WorldItem::Interface { id, .. } = item else {
-            continue;
-        };
         if !emitted.insert(key) {
             continue;
         }
         let module = serde_json::Value::String(resolve.name_world_key(key));
-        let interface = &resolve.interfaces[*id];
-        let mut ids = HashSet::new();
-        for id in interface.types.values() {
-            collect_types(resolve, &Type::Id(*id), &mut ids);
-        }
-        for function in interface.functions.values() {
-            for param in &function.params {
-                collect_types(resolve, &param.ty, &mut ids);
-            }
-            if let Some(ty) = function.result {
-                collect_types(resolve, &ty, &mut ids);
-            }
-        }
-        let mut declarations: Vec<_> = ids.into_iter().filter_map(|id| names.name(id)).collect();
+        let interface = &resolve.interfaces[id];
+        let mut live = wit_parser::LiveTypes::default();
+        live.add_interface(resolve, id);
+        let mut declarations: Vec<_> = live.iter().filter_map(|id| names.name(id)).collect();
         declarations.sort();
         declarations.dedup();
         // A JSON string literal is a valid TypeScript module specifier.
@@ -303,21 +291,19 @@ pub(super) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
                 let _ = writeln!(out, "  export type {local} = {target};");
             }
         }
-        for (name, id) in &interface.types {
-            if !matches!(names.resolve.types[*id].kind, TypeDefKind::Resource) {
-                continue;
-            }
-            let resource = type_to_ts(names, Input::Reference(Type::Id(*id)));
-            let suffix = to_pascal_case(name);
-            let _ = writeln!(
-                out,
-                "  /** Dispose an owned resource. Aliases become invalid. */\n  export function drop{suffix}(value: {resource}): void;"
-            );
-            if !imported {
+        for (resource, id) in perry_contract::interface_resources(resolve, id) {
+            for &operation in perry_contract::ResourceOperation::for_interface(!imported) {
+                let (param, ty, result) = operation.signature(id);
+                let name = operation.name(resource);
+                let ts = |ty| type_to_ts(names, Input::Reference(ty));
+                let result = result.map_or_else(|| "void".into(), ts);
+                if matches!(operation, perry_contract::ResourceOperation::Drop) {
+                    out.push_str("  /** Dispose an owned resource. Aliases become invalid. */\n");
+                }
                 let _ = writeln!(
                     out,
-                    "  export function new{suffix}(representation: number): {resource};\n  export function {local}Rep(value: {resource}): number;",
-                    local = to_camel_case(name)
+                    "  export function {name}({param}: {}): {result};",
+                    ts(ty)
                 );
             }
         }
@@ -397,24 +383,6 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
             out.push_str("}\n\n");
         }
         _ => {}
-    }
-}
-
-fn scalar_type(ty: Type) -> &'static str {
-    match ty {
-        Type::Bool => "boolean",
-        Type::U8
-        | Type::S8
-        | Type::U16
-        | Type::S16
-        | Type::U32
-        | Type::S32
-        | Type::F32
-        | Type::F64 => "number",
-        Type::U64 | Type::S64 => "bigint",
-        Type::Char | Type::String => "string",
-        Type::ErrorContext => "Error | unknown",
-        Type::Id(_) => "unknown",
     }
 }
 

@@ -6,11 +6,7 @@ use crate::{
     scalar::CompareOp,
 };
 use pliron::{
-    builtin::{
-        attributes::IntegerAttr,
-        ops::{ConstantOp, FuncOp},
-        types::{IntegerType, Signedness},
-    },
+    builtin::ops::FuncOp,
     context::{Context, Ptr},
     irbuild::{
         inserter::Inserter,
@@ -20,7 +16,6 @@ use pliron::{
     op::Op,
     operation::Operation,
     result::Result,
-    utils::apint::{APInt, bw},
     value::Value,
 };
 use std::collections::HashMap;
@@ -100,9 +95,8 @@ fn lower_compare_operand(
     match operand {
         CompareOperand::Character => scalar,
         CompareOperand::Literal(value) => {
-            let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-            let attr = IntegerAttr::new(ty, APInt::from_u64(value as u32 as u64, bw(32)));
-            let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+            let constant =
+                crate::constants::integer_constant(ctx, 32, value as u32 as u64).get_operation();
             rewriter.insert_operation(ctx, constant);
             constant.deref(ctx).get_result(0)
         }

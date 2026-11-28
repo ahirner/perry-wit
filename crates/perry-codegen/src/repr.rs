@@ -19,12 +19,6 @@ use pliron::{
 };
 use pliron_wasm::attrs::MemKind;
 
-pub(crate) fn val_type_is_i64(ctx: &Context, ty: TypeHandle) -> bool {
-    ty.deref(ctx)
-        .downcast_ref::<IntegerType>()
-        .is_some_and(|int| int.width() == 64)
-}
-
 pub(crate) fn i32_type(ctx: &Context) -> TypeHandle {
     IntegerType::get(ctx, 32, Signedness::Signless).into()
 }

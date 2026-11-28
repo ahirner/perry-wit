@@ -18,6 +18,17 @@ fn headers<'a>(h: *mut u8) -> &'a mut Headers {
     unsafe { &mut *(h as *mut Headers) }
 }
 
+fn push_field(fields: &mut Buffer, name: &[u8], value: &[u8]) {
+    for word in [
+        name.as_ptr() as u32,
+        name.len() as u32,
+        value.as_ptr() as u32,
+        value.len() as u32,
+    ] {
+        fields.extend_from_slice(&word.to_le_bytes());
+    }
+}
+
 impl Headers {
     fn fields(&self) -> impl Iterator<Item = (&'static [u8], &'static [u8])> + '_ {
         self.fields
@@ -32,14 +43,7 @@ impl Headers {
     }
 
     fn push(&mut self, name: &[u8], value: &[u8]) {
-        for word in [
-            name.as_ptr() as u32,
-            name.len() as u32,
-            value.as_ptr() as u32,
-            value.len() as u32,
-        ] {
-            self.fields.extend_from_slice(&word.to_le_bytes());
-        }
+        push_field(&mut self.fields, name, value);
     }
 
     /// Keep the fields `keep` accepts, in order.
@@ -84,38 +88,36 @@ pub(crate) extern "C" fn web_headers_copy(source: *mut u8) -> *mut u8 {
     copy
 }
 
-/// The lowercased name, or `TypeError` naming `operation`.
-fn name(operation: &[u8], name: *mut u8) -> Option<&'static [u8]> {
+fn validate(
+    operation: &[u8],
+    raw: *mut u8,
+    what: &[u8],
+    check: impl FnOnce(*const u8, u32, *mut u8, u32) -> u32,
+) -> Option<&'static [u8]> {
     // SAFETY: compiled code passes strings.
-    let text = unsafe { bytes(name) };
+    let text = unsafe { bytes(raw) };
     let output = alloc(text.len() as u32);
-    // SAFETY: helper call with an input string and a disjoint output of the same size.
-    let len = unsafe {
-        helper::fetch_header_name(text.as_ptr(), text.len() as u32, output, text.len() as u32)
-    };
+    let len = check(text.as_ptr(), text.len() as u32, output, text.len() as u32);
     if len == INVALID {
-        type_error(&[operation, b": \"", text, b"\" is an invalid header name."]);
+        type_error(&[operation, b": \"", text, b"\" is an invalid ", what, b"."]);
         return None;
     }
     // SAFETY: the helper wrote `len` bytes.
     Some(unsafe { slice(output as u32, len) })
 }
 
+/// The lowercased name, or `TypeError` naming `operation`.
+fn name(operation: &[u8], raw: *mut u8) -> Option<&'static [u8]> {
+    validate(operation, raw, b"header name", |p, n, o, c| unsafe {
+        helper::fetch_header_name(p, n, o, c)
+    })
+}
+
 /// The trimmed Latin-1 value, or `TypeError` naming `operation`.
-fn value(operation: &[u8], value: *mut u8) -> Option<&'static [u8]> {
-    // SAFETY: compiled code passes strings.
-    let text = unsafe { bytes(value) };
-    let output = alloc(text.len() as u32);
-    // SAFETY: helper call with an input string and a disjoint output of the same size.
-    let len = unsafe {
-        helper::fetch_header_value(text.as_ptr(), text.len() as u32, output, text.len() as u32)
-    };
-    if len == INVALID {
-        type_error(&[operation, b": \"", text, b"\" is an invalid header value."]);
-        return None;
-    }
-    // SAFETY: the helper wrote `len` bytes.
-    Some(unsafe { slice(output as u32, len) })
+fn value(operation: &[u8], raw: *mut u8) -> Option<&'static [u8]> {
+    validate(operation, raw, b"header value", |p, n, o, c| unsafe {
+        helper::fetch_header_value(p, n, o, c)
+    })
 }
 
 /// `headers.append(name, value)`.
@@ -154,14 +156,7 @@ pub(crate) extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8
             replaced.extend_from_slice(field);
         } else if !found {
             found = true;
-            for word in [
-                key.as_ptr() as u32,
-                key.len() as u32,
-                text.as_ptr() as u32,
-                text.len() as u32,
-            ] {
-                replaced.extend_from_slice(&word.to_le_bytes());
-            }
+            push_field(&mut replaced, key, text);
         }
     }
     list.fields = replaced;

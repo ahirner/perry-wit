@@ -1,9 +1,8 @@
 //! Binding WIT world exports to exported TypeScript functions.
-use perry_codegen::boundary::{AbiType, Export, ExportKind};
-use perry_contract::export_names::core_export_name;
-use perry_contract::types::{Contract, Input, convert};
+use super::abi::Layouts;
+use perry_codegen::boundary::{AbiKind, Export, ExportKind};
 use perry_mir::PlironResultExt as _;
-use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, diag};
+use perry_wit_diagnostics::{Diagnostic, Result, diag};
 use pliron::{
     builtin::{
         op_interfaces::SymbolOpInterface,
@@ -16,12 +15,7 @@ use std::collections::HashMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 /// Validate source number/bigint distinctions before exposing integer domains to MIR.
-fn constrain_numbers(
-    ctx: &mut Context,
-    function: &FuncOp,
-    export: &Export,
-    common_domain: bool,
-) -> Result<()> {
+fn constrain_numbers(ctx: &mut Context, function: &FuncOp, exports: &[&Export]) -> Result<()> {
     use pliron::{
         builtin::{
             type_interfaces::FunctionTypeInterface,
@@ -33,57 +27,73 @@ fn constrain_numbers(
         perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
     let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).to_diag(ctx)?;
     let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
-    if !export.is_command() && args.len() != export.params.len() {
-        return Err(diag!(
-            crate::codes::CONTRACT_MISMATCH,
-            "{} takes {} parameters but the WIT export {} has {}",
-            export.function,
-            args.len(),
-            export.core_name,
-            export.params.len()
-        )
-        .with_optional_span(perry_mir::source_span(ctx, function))
-        .with_help(format!(
-            "Update 'export function {}(...)' to accept {} parameter(s) matching WIT export '{}'.",
-            export.function,
-            export.params.len(),
-            export.core_name
-        )));
-    }
-    if args.len() != export.params.len() || results.len() != usize::from(export.result.is_some()) {
-        return Ok(());
-    }
-    let mut constrained = false;
-    for (index, (source, abi)) in args
-        .iter_mut()
-        .zip(&export.params)
-        .chain(results.iter_mut().zip(export.result.iter()))
-        .enumerate()
-    {
-        let Some(integer) = abi.integer_type(ctx) else {
-            continue;
-        };
-        let wide = matches!(abi, AbiType::S64 | AbiType::U64);
-        let is_wide_int = source
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|int| int.width() == 64);
-        if wide && !source.deref(ctx).is::<perry_mir::BigIntType>() && !is_wide_int {
-            return Err(Diagnostic::new(
+    let mut common = vec![None; args.len() + results.len()];
+    for (member, &export) in exports.iter().enumerate() {
+        if !export.is_command() && args.len() != export.params.len() {
+            return Err(diag!(
                 crate::codes::CONTRACT_MISMATCH,
-                "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion",
+                "{} takes {} parameters but the WIT export {} has {}",
+                export.declaration(),
+                args.len(),
+                export.core_name,
+                export.params.len()
             )
-            .with_optional_span(export.annotation(index).or_else(|| perry_mir::source_span(ctx,function)))
+            .with_optional_span(perry_mir::source_span(ctx, function))
             .with_help(format!(
-                "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
-                export.function, export.core_name
+                "Update 'export function {}(...)' to accept {} parameter(s) matching WIT export '{}'.",
+                export.declaration(),
+                export.params.len(),
+                export.core_name
             )));
         }
-        if common_domain
-            && (wide || source.deref(ctx).is::<FP64Type>() || source.deref(ctx).is::<IntegerType>())
+        if args.len() != export.params.len()
+            || results.len() != usize::from(export.result.is_some())
         {
-            *source = integer;
-            constrained = true;
+            common.fill(None);
+            continue;
+        }
+        for (index, (source, abi)) in args
+            .iter()
+            .zip(export.params.iter().map(|field| &field.ty))
+            .chain(results.iter().zip(export.result.iter()))
+            .enumerate()
+        {
+            let AbiKind::Scalar(perry_contract::types::Scalar::Integer(domain)) = abi.kind else {
+                common[index] = None;
+                continue;
+            };
+            let wide = domain.bits() == 64;
+            let is_wide_int = source
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64);
+            if wide && !source.deref(ctx).is::<perry_mir::BigIntType>() && !is_wide_int {
+                return Err(Diagnostic::new(
+                    crate::codes::CONTRACT_MISMATCH,
+                    "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion",
+                )
+                .with_optional_span(export.annotation(index).or_else(|| perry_mir::source_span(ctx, function)))
+                .with_help(format!(
+                    "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
+                    export.declaration(), export.core_name
+                )));
+            }
+            if member == 0 {
+                if wide
+                    || source.deref(ctx).is::<FP64Type>()
+                    || source.deref(ctx).is::<IntegerType>()
+                {
+                    common[index] = Some(domain);
+                }
+            } else if common[index] != Some(domain) {
+                common[index] = None;
+            }
+        }
+    }
+    let constrained = common.iter().any(Option::is_some);
+    for (source, domain) in args.iter_mut().chain(&mut results).zip(common) {
+        if let Some(domain) = domain {
+            *source = perry_mir::integer_type(ctx, domain).into();
         }
     }
     if constrained {
@@ -93,56 +103,55 @@ fn constrain_numbers(
 }
 
 pub(super) fn exports(
+    layouts: &mut Layouts,
+    world: WorldId,
     ctx: &mut Context,
-    targets: &[perry_lower::ExportTarget],
-    resolve: &Resolve,
-    world_id: WorldId,
-    metadata: &perry_frontend::hir_compat::Metadata,
+    targets: Vec<perry_frontend::ExportTarget>,
 ) -> Result<Vec<Export>> {
+    use perry_frontend::ExportTarget;
+    let resolve = layouts.resolve;
     let p2 =
-        perry_contract::target::for_world(resolve, world_id) == perry_contract::target::Target::P2;
-    let world = &resolve.worlds[world_id];
-    let mut bound = Vec::new();
-    for (i, entry) in perry_contract::world_functions(resolve, world.exports.iter()).enumerate() {
-        let function = entry.function;
-        let target = targets
-            .get(i)
-            .ok_or_else(|| Diagnostic::internal("world export has no witness"))?;
-        let core_name = if entry.interface.is_some() {
-            core_export_name(resolve, entry.key, function)
-        } else {
-            function.name.clone()
-        };
-        let mir_function = match target {
-            perry_lower::ExportTarget::Function(func) => func,
-            perry_lower::ExportTarget::Destructor(..) => {
-                return Err(Diagnostic::internal("expected function witness"));
-            }
-            perry_lower::ExportTarget::Command(main) => {
-                bound.push((
-                    main,
-                    Export {
-                        annotations: Vec::new(),
-                        core_name,
-                        function: perry_lower::MAIN.to_string(),
-                        params: vec![],
-                        result: None,
-                        kind: ExportKind::Async {
-                            task_return: (
-                                format!("[export]{}", resolve.name_world_key(entry.key)),
-                                function.name.clone(),
-                            ),
-                            command: true,
-                        },
+        perry_contract::target::for_world(resolve, world) == perry_contract::target::Target::P2;
+    let mut bound = Vec::with_capacity(targets.len());
+    for target in targets {
+        let (mir_function, entry, annotations, source_name, command) = match target {
+            ExportTarget::Destructor(function, core_name) => {
+                let export = Export {
+                    source_name: None,
+                    annotations: Vec::new(),
+                    core_name,
+                    signature: wit_parser::abi::WasmSignature {
+                        params: vec![wit_parser::abi::WasmType::I32],
+                        results: vec![],
+                        indirect_params: false,
+                        retptr: false,
                     },
-                ));
+                    function: function.get_symbol_name(ctx).into(),
+                    params: vec![layouts.field(Type::U32, 0)?],
+                    indirect_size: None,
+                    result: None,
+                    kind: ExportKind::Sync,
+                };
+                bound.push((function, export));
                 continue;
             }
+
+            ExportTarget::Function(function, Some(entry), annotations, name) => {
+                (function, entry, annotations, name, false)
+            }
+            ExportTarget::Command(function, entry) => (function, entry, Vec::new(), None, true),
+            ExportTarget::Function(_, None, ..) => {
+                return Err(Diagnostic::internal("source export has no WIT declaration"));
+            }
         };
+        let function = entry.function;
+        let core_name = entry.core_name(resolve);
+        let signature = layouts.signature(function, false);
         let implementation = mir_function.get_symbol_name(ctx).to_string();
         let expected_async = function.kind.is_async();
-        let is_async = perry_mir::is_async(ctx, mir_function);
-        if is_async != expected_async && !(p2 && is_async) {
+        let is_async = perry_mir::is_async(ctx, &mir_function);
+        if !command && is_async != expected_async && !(p2 && is_async) {
+            let implementation = source_name.as_deref().unwrap_or(&implementation);
             let help = if expected_async {
                 format!(
                     "Add 'async' to 'export async function {implementation}(...)' so it matches the WIT export."
@@ -158,28 +167,32 @@ pub(super) fn exports(
                 if expected_async { "not " } else { "" },
                 if expected_async { "" } else { "not " },
             )
-            .with_optional_span(perry_mir::source_span(ctx, mir_function))
+            .with_optional_span(perry_mir::source_span(ctx, &mir_function))
             .with_help(help));
         }
-        let params = function
-            .params
-            .iter()
-            .map(|param| abi_type(resolve, &param.ty))
-            .collect::<Result<_>>()?;
-        let result = function
-            .result
-            .as_ref()
-            .map(|ty| abi_type(resolve, ty))
-            .transpose()?;
-        // Async exports return through `task.return`, imported from `[export]<interface>`.
-        let kind = if is_async {
-            let module = match entry.interface {
-                Some(_) => format!("[export]{}", resolve.name_world_key(entry.key)),
-                None => "[export]$root".to_string(),
+        let (params, indirect_size, result) = if command {
+            (Vec::new(), None, None)
+        } else {
+            let (params, indirect_size) = layouts.parameters(function, &signature)?;
+            (
+                params,
+                indirect_size,
+                function.result.map(|ty| layouts.value(ty)).transpose()?,
+            )
+        };
+        let kind = if is_async || command {
+            let module = if command || entry.interface.is_some() {
+                format!("[export]{}", resolve.name_world_key(entry.key))
+            } else {
+                "[export]$root".to_owned()
             };
             ExportKind::Async {
                 task_return: (module, function.name.clone()),
-                command: false,
+                completion: if command {
+                    perry_codegen::boundary::AsyncCompletion::Command
+                } else {
+                    perry_codegen::boundary::AsyncCompletion::Function
+                },
             }
         } else {
             ExportKind::Sync
@@ -187,39 +200,28 @@ pub(super) fn exports(
         bound.push((
             mir_function,
             Export {
-                annotations: metadata.witness_annotations(i),
+                source_name,
+                annotations,
                 core_name,
+                signature,
                 function: implementation,
                 params,
+                indirect_size,
                 result,
                 kind,
             },
         ));
     }
-    for target in targets.iter().skip(bound.len()) {
-        let perry_lower::ExportTarget::Destructor(function, core_name) = target else {
-            return Err(Diagnostic::internal(
-                "unexpected witness after world functions",
-            ));
-        };
-        bound.push((
-            function,
-            Export {
-                annotations: Vec::new(),
-                core_name: core_name.clone(),
-                function: function.get_symbol_name(ctx).into(),
-                params: vec![AbiType::U32],
-                result: None,
-                kind: ExportKind::Sync,
-            },
-        ));
-    }
+    let mut groups = pliron::utils::table::IMap::default();
     for (function, export) in &bound {
-        let common_domain = bound.iter().all(|(other, abi)| {
-            function.get_operation() != other.get_operation()
-                || (abi.params == export.params && abi.result == export.result)
-        });
-        constrain_numbers(ctx, function, export, common_domain)?;
+        groups
+            .entry(function.get_operation())
+            .or_insert_with(|| (function, Vec::new()))
+            .1
+            .push(export);
+    }
+    for (function, exports) in groups.into_values() {
+        constrain_numbers(ctx, function, &exports)?;
     }
     Ok(bound.into_iter().map(|(_, export)| export).collect())
 }
@@ -238,7 +240,7 @@ pub(super) fn finalize_exports(
     exports: &mut [Export],
 ) -> Result<()> {
     let functions = module_functions(ctx, mir);
-    if functions.contains_key(perry_lower::MAIN)
+    if functions.contains_key(perry_frontend::MAIN)
         && !functions.contains_key(perry_mir::INITIALIZER)
         && !exports.iter().any(Export::is_command)
     {
@@ -260,10 +262,7 @@ pub(super) fn finalize_exports(
 
 /// Names of the interfaces `world` imports.
 pub(super) fn imports(resolve: &Resolve, world_id: WorldId) -> Vec<String> {
-    resolve.worlds[world_id]
-        .imports
-        .iter()
-        .filter(|(_, item)| matches!(item, WorldItem::Interface { .. }))
+    perry_contract::world_interfaces(&resolve.worlds[world_id].imports)
         .map(|(key, _)| resolve.name_world_key(key))
         .collect()
 }
@@ -307,72 +306,40 @@ fn stream_functions<'a>(
     })
 }
 
-pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
-    convert(resolve, Input::Reference(*ty), &|_| None, &|contract| {
-        Ok(match contract {
-            Contract::Scalar(ty) => scalar_type(ty)?,
-            Contract::Resource { id, owned } => AbiType::Resource {
-                key: perry_contract::names::canonical_type(resolve, id).index() as u32,
-                owned,
-            },
-            Contract::Bytes => AbiType::List(Box::new(AbiType::U8)),
-            Contract::ByteStream => AbiType::ByteStream,
-            Contract::List(ty) => AbiType::List(Box::new(ty?)),
-            Contract::Option(ty) => AbiType::Option(Box::new(ty?)),
-            Contract::Result { ok, err } => AbiType::Result {
-                ok: ok.transpose()?.map(Box::new),
-                err: err.transpose()?.map(Box::new),
-            },
-            Contract::Tuple(items) => AbiType::Record(
-                items
-                    .enumerate()
-                    .map(|(i, ty)| ty.map(|ty| (format!("_{i}"), ty)))
-                    .collect::<Result<_>>()?,
-            ),
-            Contract::Record(fields) => AbiType::Record(
-                fields
-                    .map(|(name, ty)| Ok((name, ty?)))
-                    .collect::<Result<_>>()?,
-            ),
-            Contract::Enum(cases) => AbiType::Enum(cases.map(str::to_owned).collect()),
-            Contract::Variant(cases) => AbiType::Variant(
-                cases
-                    .map(|(name, ty)| Ok((name.to_owned(), ty.transpose()?)))
-                    .collect::<Result<_>>()?,
-            ),
-            Contract::Unsupported(kind) => {
-                return Err(diag!(
-                    crate::codes::UNSUPPORTED_TYPE,
-                    "WIT {kind} values are not supported by the compiler yet"
-                ));
-            }
-        })
-    })
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn scalar_type(ty: Type) -> Result<AbiType> {
-    let unsupported = |name: &str| {
-        diag!(
-            crate::codes::UNSUPPORTED_TYPE,
-            "WIT {name} values are not supported by the compiler yet"
-        )
-    };
-    Ok(match ty {
-        Type::Bool => AbiType::Bool,
-        Type::U8 => AbiType::U8,
-        Type::S8 => AbiType::S8,
-        Type::U16 => AbiType::U16,
-        Type::S16 => AbiType::S16,
-        Type::U32 => AbiType::U32,
-        Type::S32 => AbiType::S32,
-        Type::U64 => AbiType::U64,
-        Type::S64 => AbiType::S64,
-        Type::F32 => AbiType::F32,
-        Type::F64 => AbiType::F64,
-        Type::String => AbiType::String,
-        Type::Char => return Err(unsupported("char")),
-        Type::ErrorContext => return Err(unsupported("error-context")),
-        // `convert` resolves named types before constructing `Contract::Scalar`.
-        Type::Id(_) => bail_internal!("named WIT type reached scalar conversion"),
-    })
+    #[test]
+    fn exported_declarations_survive_reordering() -> anyhow::Result<()> {
+        let mut resolve = Resolve::default();
+        let package = resolve.push_source("api.wit",
+            "package test:order; world api { record point { n: u32, label: string } export left: func(x: point, y: point) -> point; export right: func() -> string; }")?;
+        let world = resolve.select_world(&[package], Some("api"))?;
+        let ctx = &mut Context::new();
+        let program = perry_frontend::lower_world(
+            ctx,
+            "export function left(x: {n:number,label:string}, y: {n:number,label:string}) { return x; } export function right() { return 'r'; }",
+            "order.ts",
+            &Default::default(),
+            &perry_frontend::wit::WorldTypes::new(&resolve, Some(world)),
+            Some((&resolve, world)),
+        )?;
+        let mut targets = program.exports;
+        targets.reverse();
+        let bound = exports(&mut Layouts::new(&resolve)?, world, ctx, targets)?;
+        assert_eq!(
+            bound
+                .iter()
+                .map(|e| (e.core_name.as_str(), e.params.len()))
+                .collect::<Vec<_>>(),
+            [("right", 0), ("left", 2)]
+        );
+        let left = &bound[1];
+        let (x, y) = (&left.params[0], &left.params[1]);
+        assert_eq!((x.offset, y.offset), (0, 12));
+        assert!(std::sync::Arc::ptr_eq(&x.ty, &y.ty));
+        assert!(std::sync::Arc::ptr_eq(&x.ty, left.result.as_ref().unwrap()));
+        Ok(())
+    }
 }

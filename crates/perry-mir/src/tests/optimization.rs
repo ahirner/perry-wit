@@ -130,6 +130,36 @@ fn scalar_replacement_removes_iteration_local_records() -> Result<()> {
 }
 
 #[test]
+fn append_ownership_follows_each_arm_into_the_same_block() -> Result<()> {
+    for (other, exclusive) in [("suffix", true), ("fresh", false)] {
+        let ctx = &mut Context::new();
+        let module = parse(
+            ctx,
+            &format!(
+                r#"
+builtin.module @m {{ ^module():
+    builtin.func @run: builtin.function <(builtin.integer i1, perry.string) -> (perry.string)> {{
+      ^entry(flag: builtin.integer i1, suffix: perry.string):
+        fresh = perry.concat suffix, suffix : perry.string;
+        perry.cond_br if flag ^join(fresh, suffix) else ^join(fresh, {other})
+      ^join(a: perry.string, b: perry.string):
+        result = perry.concat a, b : perry.string;
+        perry.return result
+    }}
+}}"#
+            ),
+        );
+        verify_operation(module, ctx)?;
+        crate::append::reuse(module, ctx, &mut AnalysisManager::default())?;
+        assert_eq!(
+            print(ctx, module).contains("perry.concat_reuse [0]"),
+            exclusive
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn append_rewriting_expands_each_site_once_and_keeps_fallbacks() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(
@@ -410,7 +440,7 @@ fn sccp_folds_scalar_constants() {
 
 #[test]
 fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
-    for fixture in [TEMPORARY_RECORDS, LIVE_EDGES] {
+    for fixture in [TEMPORARY_RECORDS, LIVE_EDGES, SLOTTED_LOOP] {
         let ctx = &mut Context::new();
         let root = parse(ctx, fixture);
         let mut analyses = AnalysisManager::default();
@@ -422,25 +452,19 @@ fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
             .unwrap();
         let mut dominance = analyses.try_get_analysis_mut::<DomInfo>(root).unwrap();
         for function in crate::aggregates::functions(root, ctx) {
-            let mut values = Vec::new();
-            for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-                values.extend(block.deref(ctx).arguments());
-                for op in block.deref(ctx).iter(ctx) {
-                    values.extend(op.deref(ctx).results());
-                }
-            }
+            let values: Vec<_> = crate::function_values(ctx, &function);
             for op in crate::aggregates::operations(ctx, &function) {
                 for &value in &values {
-                    assert_eq!(
-                        intervals.after(op).contains(&value),
-                        upstream.is_live_at_point(
-                            ctx,
-                            &mut dominance,
-                            value,
-                            OpInsertionPoint::AfterOperation(op)
-                        ),
-                        "{value:?} after {op:?}"
-                    );
+                    for (set, point) in [
+                        (intervals.before(op), OpInsertionPoint::BeforeOperation(op)),
+                        (intervals.after(op), OpInsertionPoint::AfterOperation(op)),
+                    ] {
+                        assert_eq!(
+                            set.contains(&value),
+                            upstream.is_live_at_point(ctx, &mut dominance, value, point),
+                            "{value:?} at {point:?}"
+                        );
+                    }
                 }
             }
         }

@@ -24,23 +24,13 @@ impl Scope {
     }
 
     pub(super) fn for_export(state: &ModuleState, export: &Export, function: &Identifier) -> Self {
-        let marshalling = export.params.iter().chain(export.result.iter()).any(|ty| {
-            !matches!(
-                ty,
-                AbiType::Bool
-                    | AbiType::S8
-                    | AbiType::U8
-                    | AbiType::S16
-                    | AbiType::U16
-                    | AbiType::S32
-                    | AbiType::U32
-                    | AbiType::S64
-                    | AbiType::U64
-                    | AbiType::F32
-                    | AbiType::F64
-            )
-        });
-        if marshalling || export.params.len() > MAX_FLAT_PARAMS || export.is_async() {
+        let marshalling = export
+            .params
+            .iter()
+            .map(|field| &field.ty)
+            .chain(&export.result)
+            .any(|ty| !ty.is_scalar());
+        if marshalling || export.indirect_size.is_some() || export.is_async() {
             Self::Task
         } else {
             Self::for_function(state, function)

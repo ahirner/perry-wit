@@ -187,3 +187,77 @@ fn library_data_skips_zero_runs_longer_than_a_segment_header() {
     );
     assert!(super::nonzero_runs(&[0; 4]).next().is_none());
 }
+
+#[test]
+fn interns_recursive_groups_and_distinguishes_external_references() -> anyhow::Result<()> {
+    let wasm = wat::parse_str(
+        r#"(module
+        (type $a (func (param (ref null $a))))
+        (type $b (func (param (ref null $b))))
+        (type $c (func (param (ref null $a))))
+        (import "host" "one" (func (type $a)))
+        (import "host" "two" (func (type $b)))
+        (import "host" "three" (func (type $c)))
+        (import "__perry_helper" "perry_task_enter" (func (result i32)))
+        (memory (export "memory") 2))"#,
+    )?;
+    let wasm = super::link_helpers(wasm)?;
+    wasmparser::Validator::new().validate_all(&wasm)?;
+    let parsed = super::ParsedModule::parse(&wasm)?;
+    let types: Vec<_> = parsed
+        .imports
+        .iter()
+        .filter_map(|(module, _, ty)| (*module == "host").then_some(*ty))
+        .collect();
+    assert_eq!(types.len(), 3);
+    assert_eq!(types[0], types[1]);
+    assert_ne!(types[0], types[2]);
+    Ok(())
+}
+
+#[test]
+fn compacts_imports_calls_blocks_and_indirect_function_types() -> anyhow::Result<()> {
+    let core = wat::parse_str(
+        r#"(module
+            (type $a (func (param i32) (result i32)))
+            (type $b (func (param i32) (result i32)))
+            (type $pair (func (param i32 i32) (result i32 i32)))
+            (type $duplicate-pair (func (param i32 i32) (result i32 i32)))
+            (type $unused (func (param i64 i64 i64) (result f64)))
+            (import "host" "double" (func $double (type $b)))
+            (import "__perry_helper" "perry_task_enter" (func (result i32)))
+            (memory (export "memory") 2)
+            (table 1 funcref)
+            (elem (i32.const 0) $double)
+            (func (export "run") (type $a) (param i32) (result i32)
+                i32.const 0 i32.const 1
+                (block (type $duplicate-pair))
+                drop drop
+                (call_indirect (type $b) (local.get 0) (i32.const 0))))"#,
+    )?;
+    let compact = super::link_helpers(core)?;
+    let mut unique = std::collections::HashSet::new();
+    for payload in wasmparser::Parser::new(0).parse_all(&compact) {
+        if let wasmparser::Payload::TypeSection(s) = payload? {
+            for ty in s.into_iter_err_on_gc_types() {
+                let ty = ty?;
+                assert_ne!(ty.params(), &[wasmparser::ValType::I64; 3]);
+                assert!(unique.insert(ty), "duplicate linked signature");
+            }
+        }
+    }
+    assert!(!unique.is_empty());
+    let engine = wasmtime::Engine::default();
+    let module = wasmtime::Module::new(&engine, compact)?;
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker.func_wrap("host", "double", |value: i32| value * 2)?;
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &module)?;
+    assert_eq!(
+        instance
+            .get_typed_func::<i32, i32>(&mut store, "run")?
+            .call(&mut store, 21)?,
+        42
+    );
+    Ok(())
+}

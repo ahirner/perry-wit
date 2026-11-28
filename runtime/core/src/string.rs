@@ -328,43 +328,6 @@ fn compare_bytes(a: &[u8], b: &[u8]) -> i32 {
     }
 }
 
-/// Byte offset of a clamped scalar position, reusing the last forward scan.
-///
-/// # Safety
-/// `string` is a live string. A position beyond its scalar length clamps to its byte length.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn perry_string_offset(string: *mut u8, position: u32) -> u32 {
-    // SAFETY: caller supplies the string and the cache always names a scalar boundary.
-    unsafe {
-        let s = &mut *(string as *mut Str);
-        let position = position.min(s.scalars);
-        if s.scalars == s.len {
-            return position;
-        }
-        let (mut scalar, mut offset) = if position >= s.cursor_scalar {
-            (s.cursor_scalar, s.cursor_byte)
-        } else {
-            (0, 0)
-        };
-        while scalar < position {
-            let first = *s.data.add(offset as usize);
-            offset += if first < 0x80 {
-                1
-            } else if first < 0xe0 {
-                2
-            } else if first < 0xf0 {
-                3
-            } else {
-                4
-            };
-            scalar += 1;
-        }
-        s.cursor_scalar = scalar;
-        s.cursor_byte = offset;
-        offset
-    }
-}
-
 /// Shared immutable substring over byte boundaries.
 ///
 /// # Safety

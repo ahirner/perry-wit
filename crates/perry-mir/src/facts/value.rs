@@ -115,6 +115,27 @@ impl ValueState {
     }
 }
 
+/// Layout of present regex values. Null and undefined contribute no layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RegexOrigin {
+    #[default]
+    Bottom,
+    Pattern(crate::RegexShape),
+    MatchArray,
+    Other,
+}
+
+impl RegexOrigin {
+    fn join(self, rhs: Self) -> Self {
+        match (self, rhs) {
+            (Self::Bottom, x) | (x, Self::Bottom) => x,
+            (Self::Pattern(a), Self::Pattern(b)) => Self::Pattern(a.join(b)),
+            (a, b) if a == b => a,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Numeric representation, interval, absence and promise settlement share the same edges.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct ValueFacts {
@@ -122,6 +143,7 @@ pub(super) struct ValueFacts {
     pub(super) range: Range,
     pub(super) outcome: Outcomes,
     pub(super) presence: Presence,
+    pub(super) regex: RegexOrigin,
     expanded: bool,
     /// An integer literal outside the demanded width reached this value on an exact (not
     /// widening) join, so narrowing it would change the value rather than wrap an overflow.
@@ -179,25 +201,19 @@ impl ValueFacts {
             bounds,
             self.expanded || matches!(representation, Representation::Storage(_)),
         );
-        let outcome = self.outcome.join(other.outcome);
-        let presence = self.presence.join(other.presence);
-        let inexact = self.inexact
-            || other.inexact
-            || (step.clamped && matches!(domain, Fact::Literal { .. }));
-        let changed = (domain, step.range, outcome, presence, inexact)
-            != (
-                self.domain,
-                self.range,
-                self.outcome,
-                self.presence,
-                self.inexact,
-            );
-        self.domain = domain;
-        self.range = step.range;
-        self.outcome = outcome;
-        self.presence = presence;
-        self.expanded |= step.expanded;
-        self.inexact = inexact;
+        let joined = Self {
+            domain,
+            range: step.range,
+            presence: self.presence.join(other.presence),
+            regex: self.regex.join(other.regex),
+            outcome: self.outcome.join(other.outcome),
+            expanded: self.expanded || step.expanded,
+            inexact: self.inexact
+                || other.inexact
+                || (step.clamped && matches!(domain, Fact::Literal { .. })),
+        };
+        let changed = *self != joined;
+        *self = joined;
         (changed, step.widened)
     }
 }

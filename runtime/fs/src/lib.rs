@@ -18,7 +18,7 @@ extern crate std;
 mod canonical;
 mod wasi;
 
-use core::{cell::UnsafeCell, ptr};
+use core::ptr;
 use perry_rt_sys::{
     BLOCKED, Buffer, DROPPED, EVENT_FUTURE_READ, EVENT_STREAM_READ, EVENT_STREAM_WRITE,
     EVENT_SUBTASK, SUBTASK_RETURNED, UNDEFINED_BITS, adopt, alloc, bytes, bytes_view, from_bytes,
@@ -108,15 +108,7 @@ struct Op {
     next: *mut Op,
 }
 
-struct Ops(UnsafeCell<*mut Op>);
-// SAFETY: one instance runs one thread.
-unsafe impl Sync for Ops {}
-static OPS: Ops = Ops(UnsafeCell::new(ptr::null_mut()));
-
-fn ops() -> &'static mut *mut Op {
-    // SAFETY: single-threaded; no reference outlives one entry point.
-    unsafe { &mut *OPS.0.get() }
-}
+perry_rt_sys::single_thread_global!(ops: *mut Op = ptr::null_mut());
 
 const AREA: u32 = 112;
 const CHUNK: usize = 16 * 1024;
@@ -154,16 +146,23 @@ fn start(kind: Kind, path: *mut u8, data: &[u8]) -> *mut u8 {
     promise
 }
 
-/// `readFile(path, 'utf8')`: the contents as a string (invalid UTF-8 replaced).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_read_text(path: *mut u8) -> *mut u8 {
-    start(Kind::ReadText, path, &[])
+macro_rules! fs_entries {
+    ($($name:ident => $kind:ident;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) extern "C" fn $name(path: *mut u8) -> *mut u8 {
+            start(Kind::$kind, path, &[])
+        }
+    )*};
 }
 
-/// `readFile(path)`: the contents as a `Uint8Array`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_read_bytes(path: *mut u8) -> *mut u8 {
-    start(Kind::ReadBytes, path, &[])
+fs_entries! {
+    fs_read_text => ReadText;
+    fs_read_bytes => ReadBytes;
+    fs_stat => Stat;
+    fs_readdir => Readdir;
+    fs_mkdir => Mkdir;
+    fs_unlink => Unlink;
+    fs_rmdir => Rmdir;
 }
 
 /// `writeFile(path, text)`: create or truncate, then write the UTF-8 bytes.
@@ -184,36 +183,6 @@ pub(crate) unsafe extern "C" fn fs_write_text(path: *mut u8, text: *mut u8) -> *
 pub(crate) unsafe extern "C" fn fs_write_bytes(path: *mut u8, view: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     start(Kind::Write, path, unsafe { view_bytes(view) })
-}
-
-/// `stat(path)`: a stats object ([fs_stats_is_file], [fs_stats_size]).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_stat(path: *mut u8) -> *mut u8 {
-    start(Kind::Stat, path, &[])
-}
-
-/// `readdir(path)`: entry names in host order.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_readdir(path: *mut u8) -> *mut u8 {
-    start(Kind::Readdir, path, &[])
-}
-
-/// `mkdir(path)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_mkdir(path: *mut u8) -> *mut u8 {
-    start(Kind::Mkdir, path, &[])
-}
-
-/// `unlink(path)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_unlink(path: *mut u8) -> *mut u8 {
-    start(Kind::Unlink, path, &[])
-}
-
-/// `rmdir(path)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_rmdir(path: *mut u8) -> *mut u8 {
-    start(Kind::Rmdir, path, &[])
 }
 
 /// Stats: `type: u32` at 0 (a `descriptor-type` case), `size: f64` at 8.
@@ -609,28 +578,20 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                         return succeed(op, UNDEFINED_BITS);
                     }
                     _ => {
-                        let entries = op.contents.as_slice();
-                        let mut names = Buffer::new();
-                        for entry in entries.as_chunks::<{ wasi::ENTRY_SIZE }>().0 {
+                        let entries = op.contents.as_slice().as_chunks::<{ wasi::ENTRY_SIZE }>().0;
+                        let mut names =
+                            perry_rt_sys::ReferenceArray::with_capacity(entries.len() as u32);
+                        for entry in entries {
                             let at = entry.as_ptr() as *mut u8;
                             let (data, len) =
                                 (word(at, wasi::ENTRY_NAME), word(at, wasi::ENTRY_NAME + 4));
-                            // SAFETY: the host lowered the name into this task's region as UTF-8.
+                            // SAFETY: the host lowered the name as UTF-8 into this task's region.
                             let name = unsafe { adopt(data as usize as *mut u8, len) };
-                            if matches!(unsafe { bytes(name) }, b"." | b"..") {
-                                continue;
+                            if !matches!(unsafe { bytes(name) }, b"." | b"..") {
+                                names.push(name);
                             }
-                            names.extend_from_slice(&(name as usize as u64).to_le_bytes());
                         }
-                        let slots = names.as_slice();
-                        // SAFETY: 8-byte slots written above, in a block from the task region.
-                        let slots = unsafe {
-                            core::slice::from_raw_parts(
-                                slots.as_ptr() as *const u64,
-                                slots.len() / 8,
-                            )
-                        };
-                        return succeed(op, perry_rt_sys::array(slots) as usize as u64);
+                        return succeed(op, names.finish() as u64);
                     }
                 }
             }
@@ -769,18 +730,8 @@ fn finish(op: &mut Op) {
     }
     perry_rt_sys::unpin(core::mem::take(&mut op.pin));
     op.stage = Stage::Done;
-    let this = op as *mut Op;
-    let mut link: *mut *mut Op = ops();
     // SAFETY: the list holds live operations.
-    unsafe {
-        while !(*link).is_null() {
-            if *link == this {
-                *link = (*this).next;
-                break;
-            }
-            link = &mut (**link).next;
-        }
-    }
+    unsafe { perry_rt_sys::unlink_node!(ops(), op as *mut Op) };
 }
 
 fn succeed(op: &mut Op, value: u64) {

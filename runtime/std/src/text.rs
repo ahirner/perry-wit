@@ -1,5 +1,6 @@
 //! UTF-8 string methods with scalar indices, except `charCodeAt`'s UTF-16 code units.
 mod normalize;
+pub(crate) mod pattern;
 use crate::runtime::{bytes, from_static, scalars_length};
 use perry_rt_sys::whitespace::{trim_bytes, trim_end_bytes, trim_start_bytes};
 
@@ -30,26 +31,10 @@ fn clamp(value: f64, len: u64) -> u64 {
     integer(value).clamp(0, len as i64) as u64
 }
 
-fn offset(view: &View, position: u64) -> usize {
-    // SAFETY: view holds a live string and the runtime clamps the scalar position.
-    unsafe {
-        crate::runtime::string_offset(view.string, position.min(u32::MAX as u64) as u32) as usize
-    }
-}
-
-/// Scalar position of byte offset `offset` (a scalar boundary).
-fn position(text: &str, ascii: bool, offset: usize) -> u64 {
-    if ascii {
-        offset as u64
-    } else {
-        u64::from(scalars_length(&text.as_bytes()[..offset]))
-    }
-}
-
 pub(crate) struct View {
     string: *mut u8,
     pub(crate) text: &'static str,
-    scalars: u64,
+    pub(crate) scalars: u64,
     ascii: bool,
 }
 
@@ -66,67 +51,81 @@ pub(crate) fn view(string: *mut u8) -> View {
     }
 }
 
+impl View {
+    pub(crate) fn offset(&self, position: u64) -> usize {
+        let position = position.min(self.scalars) as u32;
+        if self.ascii {
+            return position as usize;
+        }
+        // The cursor always names a boundary in this immutable UTF-8 payload.
+        let header = unsafe { &mut *self.string.cast::<perry_rt_sys::layout::string::Header>() };
+        let (base, byte) = if position >= header.cursor_scalar {
+            (header.cursor_scalar, header.cursor_byte)
+        } else {
+            (0, 0)
+        };
+        let rest = &self.text[byte as usize..];
+        let offset = rest
+            .char_indices()
+            .nth((position - base) as usize)
+            .map_or(self.text.len(), |(i, _)| byte as usize + i);
+        header.cursor_scalar = position;
+        header.cursor_byte = offset as u32;
+        offset
+    }
+
+    pub(crate) fn position(&self, byte: usize) -> u32 {
+        if self.ascii {
+            return byte as u32;
+        }
+        let header = unsafe { &mut *self.string.cast::<perry_rt_sys::layout::string::Header>() };
+        let (base, from) = if byte >= header.cursor_byte as usize {
+            (header.cursor_scalar, header.cursor_byte as usize)
+        } else {
+            (0, 0)
+        };
+        let position = base + scalars_length(&self.text.as_bytes()[from..byte]);
+        header.cursor_scalar = position;
+        header.cursor_byte = byte as u32;
+        position
+    }
+}
+
 fn substring(view: &View, start: u64, end: u64) -> *mut u8 {
     if start >= end {
         return from_static(perry_rt_sys::static_text!(""));
     }
-    let from = offset(view, start);
-    let to = offset(view, end);
+    let from = view.offset(start);
+    let to = view.offset(end);
     unsafe { crate::runtime::string_view(view.string, from as u32, to as u32) }
 }
 
-/// Split into immutable views, retaining the source payload through each view.
-///
+fn literal_matches<'a>(
+    text: &'a [u8],
+    needle: &'a [u8],
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    pattern::matches(text, move |from| {
+        let start = from + find(&text[from..], needle)?;
+        Some((start, start + needle.len()))
+    })
+}
+
 /// # Safety
 /// Both arguments must be live runtime strings containing valid UTF-8.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut u8 {
     let view = view(string);
-    let separator = self::view(separator).text;
-    let text = view.text;
-    let chunks = || {
-        let mut start = 0;
-        let mut finished = false;
-        core::iter::from_fn(move || {
-            if finished {
-                return None;
-            }
-            let end = if separator.is_empty() {
-                if start == text.len() {
-                    return None;
-                }
-                start
-                    + text
-                        .get(start..)
-                        .unwrap_or("")
-                        .chars()
-                        .next()
-                        .expect("scalar")
-                        .len_utf8()
-            } else if let Some(found) = find(tail(text, start), separator.as_bytes()) {
-                start + found
-            } else {
-                finished = true;
-                text.len()
-            };
-            let range = (start, end);
-            start = end + separator.len();
-            Some(range)
-        })
+    let separator = unsafe { bytes(separator) };
+    let capacity = if separator.is_empty() {
+        view.scalars as u32
+    } else {
+        0
     };
-    let (array, slots) = crate::runtime::array_storage(chunks().count());
-    for (slot, (start, end)) in slots.iter_mut().zip(chunks()) {
-        let piece = if start == 0 && end == text.len() {
-            string
-        } else if end - start == 1 && text.as_bytes()[start].is_ascii() {
-            ascii_character(text.as_bytes()[start])
-        } else {
-            // SAFETY: valid separators and scalar iteration produce source byte boundaries.
-            unsafe { crate::runtime::string_view(string, start as u32, end as u32) }
-        };
-        *slot = piece as u64;
-    }
-    array
+    view.split(
+        literal_matches(view.text.as_bytes(), separator),
+        capacity,
+        |_, _| [],
+    )
 }
 
 /// Read a character by scalar index, returning `undefined` for invalid, fractional, or out-of-range indices.
@@ -148,12 +147,12 @@ pub(crate) extern "C" fn std_string_char_at(string: *mut u8, position: f64) -> *
         return from_static(perry_rt_sys::static_text!(""));
     }
     let position = position as u64;
-    let from = offset(&view, position);
+    let from = view.offset(position);
     let first = view.text.as_bytes()[from];
     if first.is_ascii() {
         return ascii_character(first);
     }
-    let to = offset(&view, position + 1);
+    let to = view.offset(position + 1);
     unsafe { crate::runtime::string_view(view.string, from as u32, to as u32) }
 }
 
@@ -166,7 +165,7 @@ pub(crate) extern "C" fn std_string_scalar_at(string: *mut u8, position: f64) ->
         return -1;
     }
     view.text
-        .get(offset(&view, position as u64)..)
+        .get(view.offset(position as u64)..)
         .expect("scalar offset")
         .chars()
         .next()
@@ -225,50 +224,36 @@ pub(crate) extern "C" fn std_string_index_of(
     let view = view(string);
     let needle = self::view(needle).text;
     let start = clamp(position, view.scalars);
-    let from = offset(&view, start);
-    match find(tail(view.text, from), needle.as_bytes()) {
-        Some(found) => position_of(&view, from + found) as f64,
+    let from = view.offset(start);
+    match find(&view.text.as_bytes()[from..], needle.as_bytes()) {
+        Some(found) => view.position(from + found) as f64,
         None => -1.0,
     }
 }
 
-/// Byte slice of `text` from `from`. Searching UTF-8 bytes directly is exact because a valid
-/// UTF-8 needle matches at scalar boundaries.
-fn tail(text: &str, from: usize) -> &[u8] {
-    text.as_bytes().get(from..).unwrap_or(&[])
-}
-
-fn head(text: &str, to: usize) -> &[u8] {
-    text.as_bytes().get(..to).unwrap_or(&[])
-}
-
-/// Whether `needle` occurs at `start` of `haystack` (which has room for it). An inline loop:
-/// slice equality would call `memcmp` at every candidate position.
-fn matches_at(haystack: &[u8], start: usize, needle: &[u8]) -> bool {
-    let mut index = 0;
-    while index < needle.len() {
-        if haystack[start + index] != needle[index] {
-            return false;
-        }
-        index += 1;
-    }
-    true
-}
-
-/// First occurrence: a scan for the needle's first byte, then a check of the rest.
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    let Some(&first) = needle.first() else {
+    let Some((&last, prefix)) = needle.split_last() else {
         return Some(0);
     };
-    let last = haystack.len().checked_sub(needle.len())?;
-    let mut start = 0;
-    while let Some(found) = byte_position(&haystack[start..=last], first) {
-        if matches_at(haystack, start + found, needle) {
-            return Some(start + found);
+    let candidates = haystack.get(prefix.len()..)?;
+    let mut from = 0;
+    while let Some(offset) = byte_position(&candidates[from..], last) {
+        let start = from + offset;
+        if haystack[start..].starts_with(prefix) {
+            return Some(start);
         }
-        start += found + 1;
+        from = start + 1;
     }
     None
+}
+
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(haystack.len());
+    }
+    haystack
+        .windows(needle.len())
+        .rposition(|candidate| candidate == needle)
 }
 
 /// The first position of `byte`, eight bytes per step while none of them matches.
@@ -291,20 +276,6 @@ fn byte_position(bytes: &[u8], byte: u8) -> Option<usize> {
         .map(|found| index + found)
 }
 
-fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    let Some(&first) = needle.first() else {
-        return Some(haystack.len());
-    };
-    let last = haystack.len().checked_sub(needle.len())?;
-    (0..=last)
-        .rev()
-        .find(|&start| haystack[start] == first && matches_at(haystack, start, needle))
-}
-
-fn position_of(view: &View, offset: usize) -> u64 {
-    position(view.text, view.ascii, offset)
-}
-
 /// `s.lastIndexOf(needle, position)` (pass `+Infinity` for a missing position).
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_last_index_of(
@@ -320,14 +291,12 @@ pub(crate) extern "C" fn std_string_last_index_of(
         clamp(position, view.scalars)
     };
     // The match may start at `start` at the latest.
-    let limit = offset(&view, start);
-    let end = (limit + needle.len()).min(view.text.len());
-    let mut end = end;
-    while !view.text.is_char_boundary(end) {
-        end -= 1;
-    }
-    match rfind(head(view.text, end), needle.as_bytes()) {
-        Some(found) => position_of(&view, found) as f64,
+    let limit = view.offset(start);
+    let end = view
+        .text
+        .floor_char_boundary(limit.saturating_add(needle.len()));
+    match rfind(&view.text.as_bytes()[..end], needle.as_bytes()) {
+        Some(found) => view.position(found) as f64,
         None => -1.0,
     }
 }
@@ -341,8 +310,8 @@ pub(crate) extern "C" fn std_string_starts_with(
 ) -> u32 {
     let view = view(string);
     let needle = self::view(needle).text;
-    let from = offset(&view, clamp(position, view.scalars));
-    u32::from(tail(view.text, from).starts_with(needle.as_bytes()))
+    let from = view.offset(clamp(position, view.scalars));
+    u32::from(view.text[from..].starts_with(needle))
 }
 
 /// `s.endsWith(needle, end)` (pass `+Infinity` for a missing end).
@@ -350,8 +319,8 @@ pub(crate) extern "C" fn std_string_starts_with(
 pub(crate) extern "C" fn std_string_ends_with(string: *mut u8, needle: *mut u8, end: f64) -> u32 {
     let view = view(string);
     let needle = self::view(needle).text;
-    let to = offset(&view, clamp(end, view.scalars));
-    u32::from(head(view.text, to).ends_with(needle.as_bytes()))
+    let to = view.offset(clamp(end, view.scalars));
+    u32::from(view.text[..to].ends_with(needle))
 }
 
 unsafe fn trim_with(string: *mut u8, f: fn(&[u8]) -> &[u8]) -> *mut u8 {
@@ -364,22 +333,25 @@ unsafe fn trim_with(string: *mut u8, f: fn(&[u8]) -> &[u8]) -> *mut u8 {
     unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
 }
 
-/// `s.trim()`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
-    unsafe { trim_with(string, trim_bytes) }
+macro_rules! string_wrappers {
+    ($(unsafe $name:ident($($arg:ident: $ty:ty),*) => $body:expr;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) unsafe extern "C" fn $name($($arg: $ty),*) -> *mut u8 {
+            unsafe { $body }
+        }
+    )*};
+    ($($name:ident($($arg:ident: $ty:ty),*) => $body:expr;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) extern "C" fn $name($($arg: $ty),*) -> *mut u8 {
+            $body
+        }
+    )*};
 }
 
-/// `s.trimStart()`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_trim_start(string: *mut u8) -> *mut u8 {
-    unsafe { trim_with(string, trim_start_bytes) }
-}
-
-/// `s.trimEnd()`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_trim_end(string: *mut u8) -> *mut u8 {
-    unsafe { trim_with(string, trim_end_bytes) }
+string_wrappers! {
+    unsafe std_string_trim(string: *mut u8) => trim_with(string, trim_bytes);
+    unsafe std_string_trim_start(string: *mut u8) => trim_with(string, trim_start_bytes);
+    unsafe std_string_trim_end(string: *mut u8) => trim_with(string, trim_end_bytes);
 }
 
 fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> *mut u8 {
@@ -395,16 +367,13 @@ fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> 
     let pad_scalars = (target as u64).saturating_sub(view.scalars);
     let full = pad_scalars / fill_view.scalars;
     let rem = pad_scalars % fill_view.scalars;
-    let rem_bytes = offset(&fill_view, rem);
+    let rem_bytes = fill_view.offset(rem);
     let pad_bytes = full
         .saturating_mul(fill_view.text.len() as u64)
         .saturating_add(rem_bytes as u64);
     let total = pad_bytes.saturating_add(view.text.len() as u64);
     if total > u64::from(u32::MAX >> 2) {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid string length"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid string length");
         return from_static(perry_rt_sys::static_text!(""));
     }
     let data = crate::runtime::alloc(total as u32);
@@ -430,24 +399,9 @@ fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> 
     }
 }
 
-/// `s.padStart(maxLength, fillString)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_pad_start(
-    string: *mut u8,
-    max_length: f64,
-    fill: *mut u8,
-) -> *mut u8 {
-    pad_string(string, max_length, fill, false)
-}
-
-/// `s.padEnd(maxLength, fillString)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_pad_end(
-    string: *mut u8,
-    max_length: f64,
-    fill: *mut u8,
-) -> *mut u8 {
-    pad_string(string, max_length, fill, true)
+string_wrappers! {
+    std_string_pad_start(string: *mut u8, max_length: f64, fill: *mut u8) => pad_string(string, max_length, fill, false);
+    std_string_pad_end(string: *mut u8, max_length: f64, fill: *mut u8) => pad_string(string, max_length, fill, true);
 }
 
 fn replace_string(
@@ -456,64 +410,22 @@ fn replace_string(
     replacement: *mut u8,
     replace_all: bool,
 ) -> *mut u8 {
-    let text_str = view(string).text;
-    let text = text_str.as_bytes();
-    let pat = view(needle).text.as_bytes();
-    let rep = view(replacement).text.as_bytes();
-    let mut out = crate::runtime::Buffer::new();
-    if pat.is_empty() {
-        if !replace_all {
-            crate::regex::push_substitution(&mut out, text, 0, 0, rep, &[]);
-            out.extend_from_slice(text);
-        } else {
-            let mut pos = 0;
-            crate::regex::push_substitution(&mut out, text, 0, 0, rep, &[]);
-            for ch in text_str.chars() {
-                let end = pos + ch.len_utf8();
-                out.extend_from_slice(text.get(pos..end).unwrap_or(&[]));
-                crate::regex::push_substitution(&mut out, text, end, end, rep, &[]);
-                pos = end;
-            }
-        }
-        return unsafe { out.into_string() };
-    }
-    let Some(first) = find(text, pat) else {
-        return string;
-    };
-    out.extend_from_slice(text.get(..first).unwrap_or(&[]));
-    crate::regex::push_substitution(&mut out, text, first, first + pat.len(), rep, &[]);
-    let mut cursor = first + pat.len();
-    if replace_all {
-        while let Some(rel) = find(text.get(cursor..).unwrap_or(&[]), pat) {
-            let start = cursor + rel;
-            let end = start + pat.len();
-            out.extend_from_slice(text.get(cursor..start).unwrap_or(&[]));
-            crate::regex::push_substitution(&mut out, text, start, end, rep, &[]);
-            cursor = end;
-        }
-    }
-    out.extend_from_slice(text.get(cursor..).unwrap_or(&[]));
-    unsafe { out.into_string() }
+    let view = view(string);
+    let text = view.text.as_bytes();
+    let needle = unsafe { bytes(needle) };
+    let rep = unsafe { bytes(replacement) };
+    view.replace(
+        literal_matches(text, needle),
+        replace_all,
+        |out, start, end| {
+            crate::regex::push_substitution(out, text, start, end, rep);
+        },
+    )
 }
 
-/// `s.replace(needle, replacement)` for string search.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_replace(
-    string: *mut u8,
-    needle: *mut u8,
-    replacement: *mut u8,
-) -> *mut u8 {
-    replace_string(string, needle, replacement, false)
-}
-
-/// `s.replaceAll(needle, replacement)` for string search.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_replace_all(
-    string: *mut u8,
-    needle: *mut u8,
-    replacement: *mut u8,
-) -> *mut u8 {
-    replace_string(string, needle, replacement, true)
+string_wrappers! {
+    std_string_replace(string: *mut u8, needle: *mut u8, replacement: *mut u8) => replace_string(string, needle, replacement, false);
+    std_string_replace_all(string: *mut u8, needle: *mut u8, replacement: *mut u8) => replace_string(string, needle, replacement, true);
 }
 
 /// `s.at(index)`: returns null pointer (`undefined`) when out of bounds.
@@ -537,10 +449,7 @@ pub(crate) extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut 
     let count = integer(count);
     let total = (view.text.len() as u64).saturating_mul(count.max(0) as u64);
     if count < 0 || count == i64::MAX || total > u64::from(u32::MAX >> 2) {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid count value"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid count value");
         return from_static(perry_rt_sys::static_text!(""));
     }
     let data = crate::runtime::alloc(total as u32);
@@ -609,16 +518,13 @@ fn ascii_character(byte: u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     if value < 0.0 || value > 0x10ffff as f64 || value != value as u32 as f64 {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid Unicode scalar value"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid Unicode scalar value");
         return from_static(perry_rt_sys::static_text!(""));
     }
     let Some(scalar) = char::from_u32(value as u32) else {
-        crate::runtime::raise(
+        perry_rt_sys::raise_static!(
             crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Surrogate code points are outside UTF-8 strings"),
+            "Surrogate code points are outside UTF-8 strings"
         );
         return from_static(perry_rt_sys::static_text!(""));
     };

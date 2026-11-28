@@ -9,6 +9,36 @@ fn returned(ctx: &Context, function: &FuncOp, index: usize) -> Value {
 }
 
 #[test]
+fn string_only_split_rejects_an_optimized_away_capture() -> Result<()> {
+    let ctx = &mut Context::new();
+    let body = r#"
+        text = perry.string_const "x" : perry.string;
+        re = perry.regex_const "(y){0}x", "" : perry.regex;
+        parts = perry.intrinsic RegexSplitStrings (text, re) : perry.array <perry.string>;
+    "#;
+    let parsed = parse(ctx, &single_block(body));
+    let destination = &mut Context::new();
+    crate::RegexLiteral::intern(destination, "unrelated".into(), "g".into());
+    let module = pliron::irbuild::cloning::clone_operation_into_context(
+        parsed, ctx, destination,
+        &mut pliron::irbuild::rewriter::IRRewriter::<pliron::irbuild::listener::DummyListener>::default(),
+        &mut Default::default(),
+    )?;
+    let ctx = destination;
+    verify_operation(module, ctx)?;
+    let error = crate::receivers::prove_receivers(module, ctx, &mut AnalysisManager::default())
+        .err()
+        .expect("capturing split accepted as string[]");
+    assert!(
+        error
+            .disp(ctx)
+            .to_string()
+            .contains("without capture groups")
+    );
+    Ok(())
+}
+
+#[test]
 fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
     let mut visits = Vec::new();
     for calls in [32, 128] {
@@ -440,22 +470,10 @@ builtin.module @paths { ^module():
         let module = parse(ctx, &input);
         verify_operation(module, ctx)?;
         let run = function(ctx, module, "run");
-        let stringify = first::<crate::JsonStringifyOp>(ctx, &run);
-        let intrinsic = |kind| {
-            crate::aggregates::operations(ctx, &run)
-                .into_iter()
-                .find(|&op| crate::intrinsics::intrinsic_of(ctx, op) == Some(kind))
-                .expect("fixture intrinsic")
-        };
-        let parse_op = intrinsic(crate::Intrinsic::JsonParse);
-        let consumer = intrinsic(crate::Intrinsic::JsonToNumber);
-        let site = crate::json_copy::ParseStringifySite::new(
-            ctx,
-            stringify.deref(ctx).get_operand(0),
-            (stringify, None),
-            Some(parse_op),
-            consumer,
-        );
+        let site = crate::operations(ctx, &run)
+            .into_iter()
+            .find_map(|op| crate::json_copy::ParseStringifySite::at(ctx, op))
+            .expect("parse of stringify");
         assert_eq!(
             facts(ctx, module)?.may_prevent_json_copy_between(ctx, &run, &site),
             blocks,
@@ -682,7 +700,12 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
         let results = vec![FP64Type::get(ctx).into()];
         constrain_signature(ctx, &entry, args, results);
     }
-    let facts = with_fact_limits(2, 2, || facts(ctx, module))?;
+    FactLimits {
+        max_origins: 2,
+        max_precise_contexts: 2,
+    }
+    .set(ctx, module);
+    let facts = facts(ctx, module)?;
     // One generic context, 2 precise ones and one shared summary.
     assert_eq!(facts.context_counts(&pliron::ident!("helper")), (1, 3));
     assert_eq!(facts.summarized_contexts, combos - 2);

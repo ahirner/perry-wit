@@ -1,6 +1,6 @@
 [package]
 name = "perry-wit"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 default-run = "perry-wit"
 description = "Compile TypeScript into WASI 0.2 and 0.3 WebAssembly components"
@@ -17,7 +17,6 @@ exclude = ["runtime"]
 members = [
   "crates/conformance",
   "crates/perry-mir",
-  "crates/perry-lower",
   "crates/perry-frontend",
   "crates/perry-contract",
   "crates/pliron-wasm",
@@ -33,6 +32,7 @@ unreachable_pub = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(conformance_doc_bin)'] }
 
 [workspace.dependencies]
+thiserror = "2"
 anyhow = "1.0"
 bytes = "1"
 http = "1"
@@ -40,10 +40,10 @@ http-body-util = "0.1"
 perry-abi = { path = "runtime/abi" }
 perry-contract = { path = "crates/perry-contract" }
 perry-frontend = { path = "crates/perry-frontend" }
-perry-hir = { git = "https://github.com/PerryTS/perry", rev = "9a1ed5a85eb4f915644eb9f5e75bf9acb221836d" }
+perry-hir = { git = "https://github.com/PerryTS/perry", rev = "1b63a1b5b4d13b219fab16119872c4317d4fbd5c" }
 perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
-perry-parser = { git = "https://github.com/PerryTS/perry", rev = "9a1ed5a85eb4f915644eb9f5e75bf9acb221836d" }
+perry-parser = { git = "https://github.com/PerryTS/perry", rev = "1b63a1b5b4d13b219fab16119872c4317d4fbd5c" }
 pliron = { git = "https://github.com/pliron-org/pliron", rev = "0a5e07b46607fd9b5740474581753aa927cadfc7", default-features = false }
 pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
@@ -80,9 +80,9 @@ strip = true
 perry-contract.workspace = true
 perry-frontend.workspace = true
 perry-codegen = { path = "crates/perry-codegen" }
-perry-lower = { path = "crates/perry-lower" }
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true
+pliron-control.workspace = true
 pliron.workspace = true
 wasm-encoder = { workspace = true, features = ["wasmparser"] }
 wasmparser.workspace = true

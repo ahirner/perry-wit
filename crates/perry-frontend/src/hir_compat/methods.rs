@@ -1,185 +1,75 @@
 //! Normalize array and string method calls into uniform AST call shapes before HIR lowering.
-use super::*;
 use perry_parser::swc_ecma_ast as ast;
-use swc_common::{DUMMY_SP, SyntaxContext};
-use swc_ecma_visit::{VisitMut, VisitMutWith};
-
-const PUSH: &str = "$$perryArrayPush";
-const CONCAT: &str = "$$perryArrayConcat";
-const METHOD_PREFIX: &str = "$$perryMethod_";
+use std::collections::HashSet;
+use swc_common::util::take::Take;
+use swc_ecma_utils::ExprFactory;
 
 pub(crate) enum Preservation {
     Upstream,
     Always,
     Push,
-    Concat,
     Arguments,
+    Options,
 }
 
 impl Preservation {
-    pub(crate) fn rewrite(&self, name: &str, count: usize, spread: bool) -> Option<String> {
+    pub(crate) fn needed(&self, count: usize, spread: bool) -> bool {
         match self {
-            Self::Push if count != 1 || spread => Some(PUSH.into()),
-            Self::Concat => Some(CONCAT.into()),
-            Self::Always => Some(format!("{METHOD_PREFIX}{name}")),
-            Self::Arguments if count > 0 => Some(format!("{METHOD_PREFIX}{name}")),
-            _ => None,
+            Self::Upstream => false,
+            Self::Always => true,
+            Self::Push => count != 1 || spread,
+            Self::Arguments => count > 0,
+            Self::Options => count > 1,
         }
     }
 }
 
-fn slice_call(obj: Box<ast::Expr>, start: usize) -> Box<ast::Expr> {
-    Box::new(ast::Expr::Call(ast::CallExpr {
-        span: DUMMY_SP,
-        ctxt: SyntaxContext::empty(),
-        callee: ast::Callee::Expr(Box::new(ast::Expr::Member(ast::MemberExpr {
-            span: DUMMY_SP,
-            obj,
-            prop: ast::MemberProp::Ident(ast::IdentName::new("slice".into(), DUMMY_SP)),
-        }))),
-        args: vec![ast::ExprOrSpread {
-            spread: None,
-            expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
-                span: DUMMY_SP,
-                value: start as f64,
-                raw: None,
-            }))),
-        }],
-        type_args: None,
-    }))
-}
-
-/// Keep arguments together before HIR expands a variadic push into separate mutations.
-pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut names::FreshNames) {
-    struct Arguments<'n> {
-        names: &'n mut names::FreshNames,
-    }
-    impl VisitMut for Arguments<'_> {
-        fn visit_mut_var_decl(&mut self, var_decl: &mut ast::VarDecl) {
-            let mut new_decls = Vec::with_capacity(var_decl.decls.len());
-            for mut decl in std::mem::take(&mut var_decl.decls) {
-                let rest_pat = match (&mut decl.name, decl.init.is_some()) {
-                    (ast::Pat::Array(arr_pat), true)
-                        if matches!(arr_pat.elems.last(), Some(Some(ast::Pat::Rest(_)))) =>
-                    {
-                        match arr_pat.elems.pop().flatten() {
-                            Some(ast::Pat::Rest(rest)) => Some((arr_pat.elems.len(), rest)),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some((rest_index, rest_pat)) = rest_pat
-                    && let Some(init) = decl.init.take()
-                {
-                    let mut rest_name = *rest_pat.arg;
-                    if let ast::Pat::Ident(binding) = &mut rest_name
-                        && binding.type_ann.is_none()
-                    {
-                        binding.type_ann = rest_pat.type_ann;
-                    }
-                    if rest_index == 0 {
-                        new_decls.push(ast::VarDeclarator {
-                            span: decl.span,
-                            name: rest_name,
-                            init: Some(slice_call(init, 0)),
-                            definite: false,
-                        });
-                    } else {
-                        let src_ident = match *init {
-                            ast::Expr::Ident(src_ident) => src_ident,
-                            other => {
-                                let temp_ident = ast::Ident::new(
-                                    self.names.prefix("arr_rest").into(),
-                                    DUMMY_SP,
-                                    SyntaxContext::empty(),
-                                );
-                                let type_ann = match &mut decl.name {
-                                    ast::Pat::Array(arr_pat) => arr_pat.type_ann.take(),
-                                    _ => None,
-                                };
-                                new_decls.push(ast::VarDeclarator {
-                                    span: DUMMY_SP,
-                                    name: ast::Pat::Ident(ast::BindingIdent {
-                                        id: temp_ident.clone(),
-                                        type_ann,
-                                    }),
-                                    init: Some(Box::new(other)),
-                                    definite: false,
-                                });
-                                temp_ident
-                            }
-                        };
-                        decl.init = Some(Box::new(ast::Expr::Ident(src_ident.clone())));
-                        new_decls.push(decl);
-                        new_decls.push(ast::VarDeclarator {
-                            span: DUMMY_SP,
-                            name: rest_name,
-                            init: Some(slice_call(
-                                Box::new(ast::Expr::Ident(src_ident)),
-                                rest_index,
-                            )),
-                            definite: false,
-                        });
-                    }
-                } else {
-                    new_decls.push(decl);
-                }
-            }
-            var_decl.decls = new_decls;
-            var_decl.visit_mut_children_with(self);
-        }
-
-        fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
-            call.visit_mut_children_with(self);
-            if let ast::Callee::Expr(callee) = &mut call.callee
-                && let ast::Expr::Member(member) = &mut **callee
-                && let ast::MemberProp::Ident(method) = &mut member.prop
-                && let Some(name) = crate::methods::Method::rewrite(
+pub(super) fn preserve_arguments(call: &mut ast::CallExpr, classes: &HashSet<ast::Id>) {
+    let ast::Callee::Expr(callee) = &mut call.callee else {
+        return;
+    };
+    // Perry's microtask intrinsics discard the call site. An ordinary call retains it.
+    let preserve = match &**callee {
+        ast::Expr::Ident(id) => id.sym == "queueMicrotask",
+        ast::Expr::Member(member) if let ast::MemberProp::Ident(method) = &member.prop => {
+            method.sym == "nextTick"
+                && matches!(&*member.obj, ast::Expr::Ident(_))
+                && !call.args.is_empty()
+                || call.type_args.is_some()
+                    && matches!(member.obj.as_ref(), ast::Expr::Ident(id) if classes.contains(&id.to_id()))
+                || crate::methods::Method::preserve_arguments(
                     method.sym.as_ref(),
                     call.args.len(),
-                    call.args.iter().any(|argument| argument.spread.is_some()),
+                    call.args.iter().any(|arg| arg.spread.is_some()),
                 )
-            {
-                method.sym = name.into();
-            }
         }
+        _ => false,
+    };
+    if preserve {
+        **callee = callee.take().wrap_with_paren();
     }
-    module.visit_mut_with(&mut Arguments { names });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Method<'a> {
+pub(crate) enum Method<'a> {
     UsingCheck,
-    Iteration,
     Push,
-    Concat,
-    Decode,
     Ordinary(&'a str),
 }
 
-pub fn method(name: &str) -> Method<'_> {
-    if let Some(rest) = name.strip_prefix(METHOD_PREFIX) {
-        return Method::Ordinary(rest);
-    }
+pub(crate) fn method(name: &str) -> Method<'_> {
     match name {
         "__perry_using_check__" => Method::UsingCheck,
-        streams::ITERATION => Method::Iteration,
-        PUSH => Method::Push,
-        CONCAT => Method::Concat,
-        streams::DECODE => Method::Decode,
+        "push" => Method::Push,
         name => Method::Ordinary(name),
     }
 }
 
 impl<'a> Method<'a> {
-    pub fn name(self) -> &'a str {
+    pub(crate) fn name(self) -> &'a str {
         match self {
             Self::UsingCheck => "using",
-            Self::Iteration => "[iteration]",
             Self::Push => "push",
-            Self::Concat => "concat",
-            Self::Decode => "decode",
             Self::Ordinary(name) => name,
         }
     }

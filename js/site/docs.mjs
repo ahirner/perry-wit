@@ -286,7 +286,7 @@ const RECEIVERS = new Map([
   ['Number', 'number'], ['String', 'string'], ['Array', 'Array'], ['Bytes', 'Uint8Array'], ['ByteBuffer', 'ArrayBuffer'], ['Stats', 'fs.Stats'],
   ['Regex', 'RegExp'], ['Abort', 'AbortController'], ['Writer', 'WritableStreamDefaultWriter'],
   ['Reader', 'ReadableStreamDefaultReader'], ['ReadResult', 'ReadableStream read result'], ['Date', 'Date'], ['Map', 'Map'],
-  ['Set', 'Set'], ['Url', 'URL'], ['DataView', 'DataView'],
+  ['Set', 'Set'], ['Url', 'URL'], ['DataView', 'DataView'], ['Exception', 'Error'],
 ]);
 
 /** The inventory: probed globals, then methods and module functions read from compiler tables. */
@@ -301,7 +301,7 @@ async function inventory(repository, compiler) {
   const globals = new Map();
   for (const [group, label] of GLOBALS) globals.set(group, [...(globals.get(group) ?? []), label]);
 
-  const lower = join(repository, 'crates/perry-lower/src');
+  const lower = join(repository, 'crates/perry-frontend/src/lower');
   const registry = (await readFile(join(repository, 'crates/perry-frontend/src/methods/registry.rs'), 'utf8')).split('\n');
   const methods = new Map();
   let receivers = [];

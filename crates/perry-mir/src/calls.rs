@@ -7,13 +7,13 @@ use crate::signatures::{OutputContract, ResultType, Signature, Ty};
 use crate::types::PromiseType;
 use pliron::{
     builtin::{
-        attributes::IdentifierAttr, op_interfaces::SymbolTableInterface, ops::FuncOp,
-        type_interfaces::FunctionTypeInterface, types::FunctionType,
+        attributes::IdentifierAttr, ops::FuncOp, type_interfaces::FunctionTypeInterface,
+        types::FunctionType,
     },
     common_traits::Verify,
     context::{Context, Ptr},
     identifier::Identifier,
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
@@ -21,28 +21,19 @@ use pliron::{
     verify_err,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum CallErr {
+    #[error("callee {0} is not a function of the enclosing module")]
     Unknown(String),
+    #[error("call to {0} does not match the callee's signature")]
     Signature(String),
+    #[error("perry.await operand must be a perry.promise of the result type")]
     Await,
+    #[error(
+        "perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value"
+    )]
     Timer,
 }
-
-impl core::fmt::Display for CallErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Unknown(callee) => write!(f, "callee {callee} is not a function of the enclosing module"),
-            Self::Signature(callee) => write!(f, "call to {callee} does not match the callee's signature"),
-            Self::Await => f.write_str("perry.await operand must be a perry.promise of the result type"),
-            Self::Timer => f.write_str(
-                "perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value",
-            ),
-        }
-    }
-}
-
-impl core::error::Error for CallErr {}
 
 /// Signature `(arguments, results)` of the module-level function `callee` seen from `op`.
 fn callee_signature(
@@ -50,18 +41,12 @@ fn callee_signature(
     op: Ptr<Operation>,
     callee: &Identifier,
 ) -> Result<(Vec<TypeHandle>, Vec<TypeHandle>)> {
-    let mut parent = op.deref(ctx).get_parent_op(ctx);
-    while let Some(candidate) = parent {
-        let candidate_op = Operation::get_op_dyn(candidate, ctx);
-        if let Some(table) = op_cast::<dyn SymbolTableInterface>(candidate_op.as_ref())
-            && let Some(function) = table.lookup(ctx, callee)
-            && let Some(function) = Operation::get_op::<FuncOp>(function, ctx)
-        {
-            let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
-            let ty = ty.deref(ctx);
-            return Ok((ty.arg_types(), ty.res_types()));
-        }
-        parent = candidate.deref(ctx).get_parent_op(ctx);
+    if let Some(function) = pliron_control::enclosing_symbols(ctx, op, callee)
+        .find_map(|symbol| Operation::get_op::<FuncOp>(symbol, ctx))
+    {
+        let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
+        let ty = ty.deref(ctx);
+        return Ok((ty.arg_types(), ty.res_types()));
     }
     let loc = Operation::get_op_dyn(op, ctx).loc(ctx);
     verify_err!(loc, CallErr::Unknown(callee.to_string()))

@@ -53,6 +53,9 @@ pub unsafe fn field_index(
     count: u32,
     compare: impl Fn(&[u8]) -> core::cmp::Ordering,
 ) -> u32 {
+    if count == 0 {
+        return 0;
+    }
     let names = unsafe { core::slice::from_raw_parts(table, count as usize * 2) }
         .as_chunks::<2>()
         .0;

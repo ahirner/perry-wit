@@ -111,7 +111,7 @@ impl ContextPlan {
         for (pos, ty) in arguments.iter_mut().enumerate() {
             let integer = key.args[pos].integer();
             let layout = analysis.specialized_value_type(ctx, id, body.parameters[pos])?;
-            argument_keys.push((integer.map(|i| i.bits == 64 && !i.signed), layout));
+            argument_keys.push((integer.map(|i| i.bits() == 64 && !i.signed()), layout));
             let new = integer
                 .map(|integer| integer.ty(ctx))
                 .or(layout)

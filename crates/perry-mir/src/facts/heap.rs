@@ -330,7 +330,7 @@ impl Solver {
             return Ok(());
         }
         self.analysis.heap.cells[cell].objects.insert(object);
-        if self.analysis.heap.cells[cell].objects.len() > super::max_origins() {
+        if self.analysis.heap.cells[cell].objects.len() > self.limits.max_origins {
             // Existing aliases must also lose precision, including newly arriving objects.
             let ty = self.analysis.heap.cells[cell].ty;
             let summary = self.heap_summary(ctx, ty)?;
@@ -412,6 +412,7 @@ impl Solver {
                 Range::of(integer),
             );
             facts.outcome = Outcomes::unknown(ctx, ty);
+            facts.regex = super::RegexOrigin::Other;
             facts.presence = Presence::declared(ctx, ty);
             self.update_slot(ctx, cell, facts);
             if aggregate(ctx, ty) {

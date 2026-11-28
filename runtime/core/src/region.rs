@@ -18,8 +18,6 @@ use alloc::alloc::{alloc, dealloc};
 use alloc::{boxed::Box, vec::Vec};
 #[cfg(target_arch = "wasm32")]
 use core::alloc::Layout;
-#[cfg(target_arch = "wasm32")]
-use core::cell::UnsafeCell;
 use core::ptr;
 
 /// Size of the largest standard chunk, including its header. A task's chunks start at
@@ -145,12 +143,6 @@ pub(crate) struct NativeStorage {
     tasks: Vec<Box<Task>>,
     chunks: Vec<Box<[u64]>>,
 }
-
-#[cfg(target_arch = "wasm32")]
-struct Global(UnsafeCell<Runtime>);
-// SAFETY: one instance runs one thread (the callback ABI has no shared-memory threads).
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for Global {}
 
 instance_state!(RUNTIME, runtime_state, runtime, Runtime, Runtime::new());
 
@@ -284,7 +276,7 @@ impl Task {
     }
 }
 
-fn out_of_memory() -> ! {
+pub(crate) fn out_of_memory() -> ! {
     #[cfg(target_arch = "wasm32")]
     core::arch::wasm32::unreachable();
     #[cfg(not(target_arch = "wasm32"))]
@@ -617,17 +609,32 @@ pub unsafe extern "C" fn perry_buffer_resize(
     initialized: u32,
     shape: *const u32,
 ) -> *mut u8 {
-    #[cfg(feature = "collectible")]
-    {
-        unsafe { crate::roots::resize_buffer(old, old_size, new_size, initialized, shape) }
+    unsafe {
+        resize_buffer::<{ cfg!(feature = "collectible") }>(
+            old,
+            old_size,
+            new_size,
+            initialized,
+            shape,
+        )
     }
-    #[cfg(not(feature = "collectible"))]
-    {
+}
+
+pub(crate) unsafe fn resize_buffer<const COLLECTIBLE: bool>(
+    old: *mut u8,
+    old_size: u32,
+    new_size: u32,
+    initialized: u32,
+    shape: *const u32,
+) -> *mut u8 {
+    if COLLECTIBLE {
+        unsafe { crate::roots::resize_buffer(old, old_size, new_size, initialized, shape) }
+    } else {
         assert!(
             initialized <= old_size && old_size <= new_size,
             "buffer resize bounds"
         );
-        let new = unsafe { perry_alloc_shaped(new_size, shape) };
+        let new = perry_alloc(new_size);
         if initialized != 0 {
             unsafe { ptr::copy_nonoverlapping(old, new, initialized as usize) };
         }

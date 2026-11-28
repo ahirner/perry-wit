@@ -13,210 +13,124 @@ use perry_rt_sys::layout::time as codes;
 use memory::GuestRange;
 use perry_rt_sys::guest_memory as memory;
 
-/// # Safety
-/// Input/output must be guest-owned, initialized/exclusive respectively, and disjoint.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_date_parse(input: u32, length: u32, output: u32) -> u64 {
-    unsafe {
-        scalar(
-            [(input, length)],
-            output,
-            |[input]| match crate::parse_date_milliseconds(input) {
-                Ok(value) => Ok(value),
-                Err(Error::UnsupportedDateFormat) => Err(Error::UnsupportedDateFormat),
-                Err(_) => Ok(f64::NAN),
-            },
+macro_rules! guest_entries {
+    ($($name:ident($($arg:ident: $ty:ty),* $(,)?) => $body:expr;)*) => {$(
+        /// # Safety
+        /// Input/output ranges must be guest-owned, disjoint, and outside library stack/data.
+        #[unsafe(no_mangle)]
+        pub(crate) unsafe extern "C" fn $name($($arg: $ty),*) -> u64 {
+            // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
+            unsafe { $body }
+        }
+    )*};
+}
+
+guest_entries! {
+    time_date_parse(input: u32, length: u32, output: u32) => scalar(
+        [(input, length)],
+        output,
+        |[input]| match crate::parse_date_milliseconds(input) {
+            Ok(value) => Ok(value),
+            Err(Error::UnsupportedDateFormat) => Err(Error::UnsupportedDateFormat),
+            Err(_) => Ok(f64::NAN),
+        },
+    );
+    time_date_iso(value: f64, output: u32, capacity: u32) => transform([], output, capacity, |[], output| {
+        Instant::from_epoch_milliseconds(value)?.format_milliseconds(output)
+    });
+    time_instant_parse(input: u32, length: u32, output: u32) => store(
+        [(input, length)],
+        output,
+        |[input]| Instant::parse(input),
+    );
+    time_instant_from_ms(value: f64, output: u32) => store(
+        [],
+        output,
+        |[]| Instant::from_epoch_milliseconds(value),
+    );
+    time_instant_ms(input: u32, output: u32) => scalar([(input, 16)], output, |[input]| {
+        Ok(instant(input)?.epoch_milliseconds() as f64)
+    });
+    time_instant_format(input: u32, output: u32, capacity: u32) => transform(
+        [(input, 16)],
+        output,
+        capacity,
+        |[input], output| instant(input)?.format(output),
+    );
+    time_plain_parse(input: u32, length: u32, output: u32) => store(
+        [(input, length)],
+        output,
+        |[input]| PlainDateTime::parse(input),
+    );
+    time_plain_date_parse(input: u32, length: u32, output: u32) => store(
+        [(input, length)],
+        output,
+        |[input]| PlainDateTime::parse_plain_date(input),
+    );
+    time_plain_date_from_fields(year: f64, month: f64, day: f64, overflow: u32, output: u32) => store(
+        [],
+        output,
+        |[]| PlainDateTime::from_fields(year, month, day, constrain(overflow)?),
+    );
+    time_plain_date_time_from_fields(
+        year: f64,
+        month: f64,
+        day: f64,
+        hour: f64,
+        minute: f64,
+        second: f64,
+        millisecond: f64,
+        microsecond: f64,
+        nanosecond: f64,
+        overflow: u32,
+        output: u32,
+    ) => store([], output, |[]| {
+        PlainDateTime::from_date_time_fields(
+            [
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                millisecond,
+                microsecond,
+                nanosecond,
+            ],
+            constrain(overflow)?,
         )
-    }
-}
-
-/// # Safety
-/// Output must be exclusively guest-owned outside library stack/data during this call.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_date_iso(value: f64, output: u32, capacity: u32) -> u64 {
-    // SAFETY: the caller owns output; transform checks its guest-memory range.
-    unsafe {
-        transform([], output, capacity, |[], output| {
-            Instant::from_epoch_milliseconds(value)?.format_milliseconds(output)
-        })
-    }
-}
-
-/// # Safety
-/// Input/output must be guest-owned, initialized/exclusive respectively, outside
-/// library stack/data, and remain valid during this single-threaded call.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_instant_parse(input: u32, length: u32, output: u32) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe { store([(input, length)], output, |[input]| Instant::parse(input)) }
-}
-
-/// # Safety
-/// Output must be exclusively guest-owned outside library stack/data during this call.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_instant_from_ms(value: f64, output: u32) -> u64 {
-    // SAFETY: no input range; output ownership is the caller's contract.
-    unsafe { store([], output, |[]| Instant::from_epoch_milliseconds(value)) }
-}
-
-/// # Safety
-/// The input range must be initialized, and the output range must be exclusively owned and disjoint.
-/// Both ranges must be outside library stack/data.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_instant_ms(input: u32, output: u32) -> u64 {
-    unsafe {
-        scalar([(input, 16)], output, |[input]| {
-            Ok(instant(input)?.epoch_milliseconds() as f64)
-        })
-    }
-}
-
-/// # Safety
-/// Same caller-owned, disjoint memory contract as time_instant_parse.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_instant_format(input: u32, output: u32, capacity: u32) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe {
-        transform([(input, 16)], output, capacity, |[input], output| {
-            instant(input)?.format(output)
-        })
-    }
-}
-
-/// # Safety
-/// Same caller-owned, disjoint memory contract as time_instant_parse.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_parse(input: u32, length: u32, output: u32) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe {
-        store([(input, length)], output, |[input]| {
-            PlainDateTime::parse(input)
-        })
-    }
-}
-
-/// # Safety
-/// Same caller-owned, disjoint memory contract as time_instant_parse.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_date_parse(input: u32, length: u32, output: u32) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe {
-        store([(input, length)], output, |[input]| {
-            PlainDateTime::parse_plain_date(input)
-        })
-    }
-}
-
-/// # Safety
-/// Output must be exclusively guest-owned outside library stack/data during this call.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_date_from_fields(
-    year: f64,
-    month: f64,
-    day: f64,
-    overflow: u32,
-    output: u32,
-) -> u64 {
-    // SAFETY: no input range; output ownership is the caller's contract.
-    unsafe {
-        store([], output, |[]| {
-            PlainDateTime::from_fields(year, month, day, constrain(overflow)?)
-        })
-    }
-}
-
-/// # Safety
-/// Output must be exclusively guest-owned outside library stack/data during this call.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_date_time_from_fields(
-    year: f64,
-    month: f64,
-    day: f64,
-    hour: f64,
-    minute: f64,
-    second: f64,
-    millisecond: f64,
-    microsecond: f64,
-    nanosecond: f64,
-    overflow: u32,
-    output: u32,
-) -> u64 {
-    unsafe {
-        store([], output, |[]| {
-            PlainDateTime::from_date_time_fields(
-                [
-                    year,
-                    month,
-                    day,
-                    hour,
-                    minute,
-                    second,
-                    millisecond,
-                    microsecond,
-                    nanosecond,
-                ],
-                constrain(overflow)?,
-            )
-        })
-    }
-}
-
-/// # Safety
-/// Same caller-owned, disjoint memory contract as time_instant_parse.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_add_days(input: u32, days: f64, output: u32) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe {
-        store([(input, 16)], output, |[input]| {
-            plain(input)?.add_days(count(days)?)
-        })
-    }
-}
-
-/// # Safety
-/// Same caller-owned, disjoint memory contract as time_instant_parse.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_add_calendar(
-    input: u32,
-    years: f64,
-    months: f64,
-    weeks: f64,
-    days: f64,
-    overflow: u32,
-    output: u32,
-) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe {
-        store([(input, 16)], output, |[input]| {
-            let constrain = constrain(overflow)?;
-            let [y, m, w, d] = [years, months, weeks, days].map(count);
-            let fields = [y?, m?, w?, d?];
-            // Temporal rejects durations whose nonzero fields disagree in sign.
-            let mut signs = fields.iter().map(|n| n.signum()).filter(|&s| s != 0);
-            if let Some(first) = signs.next()
-                && signs.any(|s| s != first)
-            {
-                return Err(Error::Range);
-            }
-            let [y, m, w, d] = fields;
-            plain(input)?.add_calendar(y, m, w, d, constrain)
-        })
-    }
-}
-
-/// # Safety
-/// Both input ranges must be initialized, and the output range must be exclusively owned and disjoint from both.
-/// All ranges must be outside library stack/data.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_until_part(
-    a: u32,
-    b: u32,
-    largest_unit: u32,
-    part: u32,
-    output: u32,
-) -> u64 {
-    unsafe {
-        scalar([(a, 16), (b, 16)], output, |[a, b]| {
+    });
+    time_plain_add_days(input: u32, days: f64, output: u32) => store(
+        [(input, 16)],
+        output,
+        |[input]| plain(input)?.add_days(count(days)?),
+    );
+    time_plain_add_calendar(
+        input: u32,
+        years: f64,
+        months: f64,
+        weeks: f64,
+        days: f64,
+        overflow: u32,
+        output: u32,
+    ) => store([(input, 16)], output, |[input]| {
+        let constrain = constrain(overflow)?;
+        let [y, m, w, d] = [years, months, weeks, days].map(count);
+        let fields = [y?, m?, w?, d?];
+        // Temporal rejects durations whose nonzero fields disagree in sign.
+        let mut signs = fields.iter().map(|n| n.signum()).filter(|&s| s != 0);
+        if let Some(first) = signs.next()
+            && signs.any(|s| s != first)
+        {
+            return Err(Error::Range);
+        }
+        let [y, m, w, d] = fields;
+        plain(input)?.add_calendar(y, m, w, d, constrain)
+    });
+    time_plain_until_part(a: u32, b: u32, largest_unit: u32, part: u32, output: u32) => scalar(
+        [(a, 16), (b, 16)],
+        output,
+        |[a, b]| {
             let unit = code::<Unit>(largest_unit)?;
             let part = code::<DurationPart>(part)?;
             let (a, b) = (plain(a)?, plain(b)?);
@@ -244,17 +158,12 @@ pub(crate) unsafe extern "C" fn time_plain_until_part(
                 DurationPart::Weeks => weeks,
                 DurationPart::Days => days,
             }))
-        })
-    }
-}
-
-/// # Safety
-/// The input range must be initialized, and the output range must be exclusively owned and disjoint.
-/// Both ranges must be outside library stack/data.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32, output: u32) -> u64 {
-    unsafe {
-        scalar([(input, 16)], output, |[input]| {
+        },
+    );
+    time_plain_part(input: u32, part: u32, output: u32) => scalar(
+        [(input, 16)],
+        output,
+        |[input]| {
             let part = code::<DatePart>(part)?;
             let value = plain(input)?;
             let (year, month, day) = value.date();
@@ -271,36 +180,20 @@ pub(crate) unsafe extern "C" fn time_plain_part(input: u32, part: u32, output: u
                 DatePart::Nanosecond => f64::from(fraction % 1_000),
                 DatePart::Weekday => f64::from(value.weekday()),
             })
-        })
-    }
-}
-
-/// # Safety
-/// Same caller-owned, disjoint memory contract as time_instant_parse.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_format(input: u32, output: u32, capacity: u32) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe {
-        transform([(input, 16)], output, capacity, |[input], output| {
-            plain(input)?.format(output)
-        })
-    }
-}
-
-/// # Safety
-/// Same caller-owned, disjoint memory contract as time_instant_parse.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn time_plain_date_format(
-    input: u32,
-    output: u32,
-    capacity: u32,
-) -> u64 {
-    // SAFETY: forwarded guest ownership contract; ranges and overlap are checked.
-    unsafe {
-        transform([(input, 16)], output, capacity, |[input], output| {
-            plain(input)?.format_plain_date(output)
-        })
-    }
+        },
+    );
+    time_plain_format(input: u32, output: u32, capacity: u32) => transform(
+        [(input, 16)],
+        output,
+        capacity,
+        |[input], output| plain(input)?.format(output),
+    );
+    time_plain_date_format(input: u32, output: u32, capacity: u32) => transform(
+        [(input, 16)],
+        output,
+        capacity,
+        |[input], output| plain(input)?.format_plain_date(output),
+    );
 }
 
 /// Read a UTC date field, returning `NaN` for invalid time values.

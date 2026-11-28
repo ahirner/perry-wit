@@ -19,6 +19,7 @@ mod collectible;
 pub mod exception;
 pub mod host;
 mod instance;
+mod numeric;
 #[cfg(not(target_arch = "wasm32"))]
 pub use instance::native::RuntimeInstance;
 pub mod io;
@@ -41,23 +42,48 @@ static ALLOCATOR: heap::Allocator = heap::Allocator::new();
 /// value of `Promise<void>`.
 pub(crate) const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 
+macro_rules! dlist_push_front {
+    ($head:expr, $node:expr, $prev:ident, $next:ident) => {{
+        (*$node).$next = $head;
+        if !$head.is_null() {
+            (*$head).$prev = $node;
+        }
+        $head = $node;
+    }};
+}
+pub(crate) use dlist_push_front;
+
+macro_rules! dlist_unlink {
+    ($head:expr, $node:expr, $prev:ident, $next:ident $(, tail = $tail:expr)?) => {{
+        let previous = (*$node).$prev;
+        let next = (*$node).$next;
+        if previous.is_null() {
+            $head = next;
+        } else {
+            (*previous).$next = next;
+        }
+        if next.is_null() {
+            $($tail = previous;)?
+        } else {
+            (*next).$prev = previous;
+        }
+        (*$node).$prev = core::ptr::null_mut();
+        (*$node).$next = core::ptr::null_mut();
+    }};
+}
+pub(crate) use dlist_unlink;
+
 #[inline(always)]
 pub(crate) fn byte_size(elements: u32, stride: u32, overhead: u32) -> u32 {
     elements
         .checked_mul(stride)
         .and_then(|bytes| bytes.checked_add(overhead))
-        .expect("sequence capacity overflow")
+        .unwrap_or_else(|| region::out_of_memory())
 }
 
 #[inline(always)]
 pub(crate) fn sequence_length(left: u32, right: u32) -> u32 {
     left.checked_add(right).expect("sequence length overflow")
-}
-
-/// ECMAScript `%` on numbers: the IEEE remainder truncated toward zero (C `fmod`).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_f64_rem(dividend: f64, divisor: f64) -> f64 {
-    libm::fmod(dividend, divisor)
 }
 
 #[cfg(test)]
@@ -258,8 +284,8 @@ mod tests {
                 assert_eq!(*header.add(1), 128);
             }
             perry_task_end();
-            assert_eq!(perry_f64_rem(7.5, 2.0), 1.5);
-            assert_eq!(perry_f64_rem(-7.5, 2.0), -1.5);
+            assert_eq!(numeric::perry_f64_rem(7.5, 2.0), 1.5);
+            assert_eq!(numeric::perry_f64_rem(-7.5, 2.0), -1.5);
         });
     }
 }

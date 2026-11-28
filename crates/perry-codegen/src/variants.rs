@@ -45,10 +45,7 @@ impl FunctionLowering<'_, '_> {
                 let tag = self.state.data.string(tag);
                 let tag = self.i32_const(ctx, tag as i32);
                 let matches = self.num(ctx, NumOpcode::I32Eq, vec![tag_a, tag]);
-                let active = self.new_block(ctx, vec![]);
-                let next = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, matches, (active, vec![]), (next, vec![]));
-                self.block = active;
+                let next = self.enter_if(ctx, matches);
                 Some(next)
             } else {
                 None
@@ -88,7 +85,10 @@ impl FunctionLowering<'_, '_> {
         );
         let object = if self.state.collectible {
             let pointers = [variant::OWNER, variant::JSON];
-            let shape = self.pointer_shape(&pointers[..1 + usize::from(self.state.retains_json)]);
+            let shape = self
+                .state
+                .data
+                .pointer_shape(&pointers[..1 + usize::from(self.state.retains_json)]);
             let shape = self.i32_const(ctx, shape as i32);
             self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
         } else {

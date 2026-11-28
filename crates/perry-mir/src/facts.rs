@@ -8,14 +8,15 @@ use crate::{calls::AwaitOp, scalar::NumericCastOp, semantics::OperationKind, typ
 use pliron::{
     builtin::{
         attributes::{IdentifierAttr, TypeAttr},
-        op_interfaces::{BranchOpInterface, SymbolOpInterface},
+        op_interfaces::SymbolOpInterface,
         ops::FuncOp,
         type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
+    common_traits::Verify,
     context::{Context, Ptr},
     identifier::Identifier,
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
     pass::{Analysis, AnalysisManager},
     result::Result,
@@ -23,10 +24,7 @@ use pliron::{
     utils::table::HSet,
     value::Value,
 };
-use std::{
-    cell::Cell,
-    collections::{BTreeSet, HashMap, VecDeque},
-};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 mod domains;
 pub(crate) mod guards;
@@ -35,13 +33,14 @@ pub(crate) mod paths;
 mod rewrite;
 mod transfer;
 use domains::{
-    Fact, Integer, Interval, Range, ResultDomain, arithmetic_range, comparison_domain,
+    Fact, Integer, Interval, MirInteger, Range, ResultDomain, arithmetic_range, comparison_domain,
     constant_range, integer_arithmetic, literal,
 };
 #[cfg(test)]
 pub(crate) use rewrite::verify_lossless_module;
 pub(crate) use rewrite::{specialize, verify_lossless_operations};
 mod value;
+pub(crate) use value::RegexOrigin;
 use value::{Demand, Presence, Representation, ValueFacts, ValueState};
 mod outcomes;
 use outcomes::Outcomes;
@@ -214,6 +213,9 @@ impl Body {
         for op in crate::aggregates::operations(ctx, &function) {
             let index = constraints.len();
             let kind = OperationKind::classify(ctx, op);
+            if kind == OperationKind::JsonDecode && Operation::is_op::<crate::JsonCopyOp>(op, ctx) {
+                op.deref(ctx).verify(ctx)?;
+            }
             constraints.push(Constraint::Op { op, kind });
             if kind == OperationKind::Return {
                 returns.push(op);
@@ -237,21 +239,12 @@ impl Body {
             for value in op.deref(ctx).operands().chain(op.deref(ctx).results()) {
                 dependents.entry(value).or_default().push(index);
             }
-            let dynamic = Operation::get_op_dyn(op, ctx);
-            if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
-                for successor in 0..op.deref(ctx).get_num_successors() {
-                    let block = op.deref(ctx).get_successor(successor);
-                    for (to, from) in block
-                        .deref(ctx)
-                        .arguments()
-                        .zip(branch.successor_operands(ctx, successor))
-                    {
-                        let index = constraints.len();
-                        constraints.push(Constraint::Edge { from, to });
-                        dependents.entry(from).or_default().push(index);
-                        dependents.entry(to).or_default().push(index);
-                    }
-                }
+            for (position, to) in pliron_control::forwarded_arguments(ctx, op) {
+                let from = op.deref(ctx).get_operand(position);
+                let index = constraints.len();
+                constraints.push(Constraint::Edge { from, to });
+                dependents.entry(from).or_default().push(index);
+                dependents.entry(to).or_default().push(index);
             }
         }
         let (declared_args, declared_results) = match signature {
@@ -284,43 +277,32 @@ impl Body {
     }
 }
 
-/// Specialized contexts per function before further keys share one summary context, so a
-/// function has one generic context and at most `MAX_PRECISE_CONTEXTS + 1` specialized ones.
-const MAX_PRECISE_CONTEXTS: usize = 32;
-/// Allocation sites an alias set holds before it collapses to a typed summary.
-const MAX_ORIGINS: usize = 32;
-
-std::thread_local! {
-    static FACT_LIMITS: Cell<(usize, usize)> = const {
-        Cell::new((MAX_ORIGINS, MAX_PRECISE_CONTEXTS))
-    };
+/// Precision budgets for one compilation's alias and call-context analysis.
+#[pliron::derive::pliron_attr(name = "perry.fact_limits", format, verifier = "succ")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FactLimits {
+    pub max_origins: usize,
+    pub max_precise_contexts: usize,
 }
 
-fn max_origins() -> usize {
-    FACT_LIMITS.get().0
-}
-
-fn max_precise_contexts() -> usize {
-    FACT_LIMITS.get().1
-}
-
-/// Temporarily overrides `(MAX_ORIGINS, MAX_PRECISE_CONTEXTS)` on the current thread
-/// for metamorphic testing of precision summarization vs. exact specialization.
-#[doc(hidden)]
-pub fn with_fact_limits<R>(
-    max_origins: usize,
-    max_precise_contexts: usize,
-    f: impl FnOnce() -> R,
-) -> R {
-    /// Restores the previous limits however `f` exits.
-    struct Restore((usize, usize));
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            FACT_LIMITS.set(self.0);
+impl Default for FactLimits {
+    fn default() -> Self {
+        Self {
+            max_origins: 32,
+            max_precise_contexts: 32,
         }
     }
-    let _restore = Restore(FACT_LIMITS.replace((max_origins, max_precise_contexts)));
-    f()
+}
+
+pliron::dict_key!(FACT_LIMITS, "perry_fact_limits");
+
+impl FactLimits {
+    pub fn set(self, ctx: &mut Context, module: Ptr<Operation>) {
+        module
+            .deref_mut(ctx)
+            .attributes
+            .set(FACT_LIMITS.clone(), self);
+    }
 }
 
 #[derive(Default)]
@@ -410,16 +392,9 @@ pub struct ProgramFacts {
     has_array_holes: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("function {0} has no effect summary")]
 struct MissingEffects(Identifier);
-
-impl core::fmt::Display for MissingEffects {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "function {} has no effect summary", self.0)
-    }
-}
-
-impl core::error::Error for MissingEffects {}
 
 impl ProgramFacts {
     fn generic_context(&self, name: &Identifier) -> Option<usize> {
@@ -462,6 +437,11 @@ impl ProgramFacts {
     fn range(&self, ctx: &Context, value: Value) -> Range {
         self.value_facts(ctx, value)
             .map_or(Range::Unknown, |facts| facts.range)
+    }
+
+    pub(crate) fn regex_origin(&self, ctx: &Context, value: Value) -> RegexOrigin {
+        self.value_facts(ctx, value)
+            .map_or(RegexOrigin::Other, |facts| facts.regex)
     }
 
     fn presence(&self, ctx: &Context, value: Value) -> Presence {
@@ -538,6 +518,7 @@ impl Worklist {
 }
 
 struct Solver {
+    limits: FactLimits,
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
     precise_counts: HashMap<Identifier, usize>,
@@ -606,7 +587,7 @@ impl Solver {
                 return Ok(id);
             }
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
-            if *count >= max_precise_contexts() {
+            if *count >= self.limits.max_precise_contexts {
                 self.analysis.summarized_contexts += 1;
                 let summary = self.summary_key(ctx, &key);
                 let id = match self.contexts.get(&summary).copied() {
@@ -655,6 +636,7 @@ impl Solver {
                 ),
             );
             if body.external {
+                facts.regex = RegexOrigin::Other;
                 facts.outcome = Outcomes::unknown(ctx, parameter.get_type(ctx));
             }
             facts.presence = Presence::declared(ctx, parameter.get_type(ctx));
@@ -725,9 +707,16 @@ impl Analysis for ProgramFacts {
     }
 
     fn compute(root: Ptr<Operation>, ctx: &Context, _: &mut AnalysisManager) -> Result<Self> {
+        let limits = root
+            .deref(ctx)
+            .attributes
+            .get::<FactLimits>(&FACT_LIMITS)
+            .copied()
+            .unwrap_or_default();
         let functions = crate::aggregates::functions(root, ctx);
         let effects = crate::effects::prepare(ctx, &functions)?;
         let mut solver = Solver {
+            limits,
             analysis: Self {
                 bodies: functions
                     .iter()

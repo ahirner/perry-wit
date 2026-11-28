@@ -72,11 +72,8 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// Continue only when `condition` is false; otherwise trap.
-    fn trap_if(&mut self, ctx: &mut Context, condition: Value) {
-        let valid = self.new_block(ctx, vec![]);
-        let trap = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, condition, (trap, vec![]), (valid, vec![]));
-        self.block = trap;
+    pub(super) fn trap_if(&mut self, ctx: &mut Context, condition: Value) {
+        let valid = self.enter_if(ctx, condition);
         self.trap(ctx);
         self.block = valid;
     }

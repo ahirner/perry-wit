@@ -63,8 +63,6 @@ mod temporal;
 mod values;
 mod variants;
 
-pub use memory::explain_tiers;
-
 /// Import module of runtime and standard-library functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
 /// Starting address of static data, leaving address 0 as the null reference (`undefined`).
@@ -101,8 +99,9 @@ pub fn compile(
     mir: &ModuleOp,
     exports: &Exports<'_>,
     analyses: &mut AnalysisManager,
+    allocation_report: Option<&mut String>,
 ) -> Result<Vec<u8>> {
-    let (wasm, data, memory) = module::lower(ctx, mir, exports, analyses)?;
+    let (wasm, data, memory) = module::lower(ctx, mir, exports, analyses, allocation_report)?;
     let mut cleanup = Passes::default();
     cleanup.add_pass(SimplifyCFGPass);
     cleanup.add_pass(DCEPass);
@@ -118,8 +117,9 @@ pub fn compile(
         == pliron::irbuild::IRStatus::Changed
     {}
     // Resuming an `await` inside a loop enters the loop at a second block.
-    for function in analysis::module_functions(ctx, &wasm) {
-        pliron_wasm::reducible::make_reducible(ctx, &function);
+    for function in perry_mir::functions(wasm.get_operation(), ctx) {
+        pliron_wasm::reducible::make_reducible(ctx, &function)
+            .map_err(perry_wit_diagnostics::Diagnostic::internal)?;
     }
     verify_operation(wasm.get_operation(), ctx)
         .to_diag(ctx)

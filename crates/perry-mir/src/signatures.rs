@@ -32,12 +32,16 @@ macro_rules! type_kinds {
     ) => {
         /// Operand and result kinds of intrinsic signatures.
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-        pub(super) enum Ty { $($(#[$meta])* $kind),* }
+        pub enum Ty { $($(#[$meta])* $kind),* }
 
-        impl ResultType for Ty {
-            fn get(self, $ctx: &Context) -> TypeHandle {
+        impl Ty {
+            pub fn canonical(self, $ctx: &Context) -> TypeHandle {
                 match self { $(Ty::$kind => $canonical),* }
             }
+        }
+
+        impl ResultType for Ty {
+            fn get(self, ctx: &Context) -> TypeHandle { self.canonical(ctx) }
             /// Whether `ty` is the canonical type or an explicitly accepted alternative:
             /// indices and intrinsic booleans admit any signedness, readers include BYOB,
             /// and optional numbers and bytes (including `Promise<void>`) admit any absence.
@@ -78,8 +82,11 @@ type_kinds! {
     NullString = OptionalType::get_with(ctx, Ty::String.get(ctx), crate::attrs::Absence::Null).into();
     OptNumber = OptionalType::get(ctx, Ty::Number.get(ctx)).into(),
         accepts optional_of(ctx, ty, Ty::Number);
+    /// Array receiver whose extended regex match header is proven by ProgramFacts.
+    MatchArray = Ty::OptStringArray.get(ctx),
+        accepts ty.deref(ctx).is::<ArrayType>();
+    NullOptStringArray = OptionalType::get_with(ctx, Ty::MatchArray.get(ctx), crate::attrs::Absence::Null).into();
     OptStringArray = ArrayType::get(ctx, Ty::OptString.get(ctx)).into();
-    NullOptStringArray = OptionalType::get_with(ctx, Ty::OptStringArray.get(ctx), crate::attrs::Absence::Null).into();
     StringArray = ArrayType::get(ctx, Ty::String.get(ctx)).into();
     NumberArray = ArrayType::get(ctx, Ty::Number.get(ctx)).into(),
         accepts ty.deref(ctx).downcast_ref::<ArrayType>()
@@ -139,16 +146,9 @@ fn optional_of(ctx: &Context, ty: TypeHandle, value: Ty) -> bool {
     crate::optional::optional_value(ctx, ty) == Some(value.get(ctx))
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("record projection is missing its field name")]
 pub(super) struct MissingProjectionField;
-
-impl core::fmt::Display for MissingProjectionField {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("record projection is missing its field name")
-    }
-}
-
-impl core::error::Error for MissingProjectionField {}
 
 pub(super) trait TypePattern: Copy {
     fn accepts_type(self, ctx: &Context, ty: TypeHandle) -> bool;

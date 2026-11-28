@@ -1,128 +1,108 @@
 //! The boundary for source facts and compiler-generated forms that Perry HIR erases.
 use crate::modules;
 use perry_hir::{
-    ir::{CompareOp, Expr, Module as HirModule, Stmt},
-    types::{LocalId, Type as HirType},
+    ir::{CompareOp, Expr, Stmt},
+    types::LocalId,
 };
+use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashMap;
+use swc_common::util::take::Take;
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
-use swc_ecma_visit::VisitMutWith;
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 mod calls;
 mod classes;
-mod constructors;
-pub use calls::{GuestCall, RuntimeCall, runtime_call};
-mod defaults;
-pub use defaults::strip_synthetic_default_guards;
+pub(crate) use calls::{
+    MemberKey, RuntimeCall, call_arguments, class_receiver, map_group_by, member,
+    member_assignment, runtime_call,
+};
+pub(crate) use classes::{direct_constructor, private_field};
 mod locations;
 pub(crate) use calls::{is_array_insertion, is_source_extern};
-pub(crate) use constructors::typed_collection;
-pub(crate) use iteration::is_object_coercibility_check;
-pub use locations::{Locations, non_null_assertion};
-pub(crate) use locations::{display_name, function_label, has_source_offset, mark_non_null};
-pub(crate) use names::{is_reserved_binding, module_binding_name};
-mod methods;
-mod names;
-mod parser;
-pub(crate) use parser::parse;
+pub(crate) use locations::{Locations, non_null_assertion};
+pub(crate) use locations::{display_name, function_label, has_source_offset};
 mod iteration;
-mod regex;
-pub use iteration::{Availability, Iteration, RecordExpr};
-pub(crate) mod resource_classes;
+mod methods;
+pub(crate) use iteration::{Availability, Binding, Locals, RecordExpr};
 mod streams;
 mod timers;
 mod witnesses;
-pub use constructors::{Constructor, Constructors};
 pub(crate) use methods::Preservation;
-pub use methods::{Method, method};
-pub use streams::is_writable_to_web;
-pub use timers::is_timer_module;
-pub(crate) use timers::{TIMER_CLASS, is_timer_handle};
-pub(crate) use witnesses::Witness;
+pub(crate) use methods::{Method, method};
+pub(crate) use streams::is_writable_to_web;
+pub(crate) use timers::is_timer_module;
+pub(crate) use witnesses::{
+    ExportDeclaration, ResourceClass, ResourceClasses, SourceWitness, Target, Witnesses,
+    adapter_name,
+};
 
-pub struct Metadata<'s> {
-    pub(crate) witnesses: Vec<Witness<perry_hir::types::FuncId>>,
-    pub(crate) resource_members: Vec<crate::wit::ResourceMember>,
-    pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
-    pub locations: Locations<'s>,
-    pub inferred_bindings: HashSet<LocalId>,
-    /// Bindings declared without an initializer.
-    pub deferred_bindings: HashSet<LocalId>,
-    pub constructors: Constructors,
-    pub sparse_arrays: bool,
-    /// Monomorphized class name -> original source class name (for `instanceof`).
-    pub class_origins: HashMap<String, String>,
-    /// Unannotated deferred locals whose union branches all encode as JSON, eligible for JSON
-    /// storage in lowering if lowering cannot represent the union natively.
-    pub json_eligible_bindings: HashSet<LocalId>,
+struct Prepare<'a> {
+    analysis: &'a mut crate::source::Analysis,
+    error: Option<Diagnostic>,
 }
 
-impl Metadata<'_> {
-    pub fn witness_annotations(
-        &self,
-        ordinal: usize,
-    ) -> Vec<Option<perry_wit_diagnostics::SourceSpan>> {
-        self.witnesses
-            .get(ordinal)
-            .and_then(|w| w.signature.as_ref())
-            .into_iter()
-            .flat_map(|s| &s.annotations)
-            .map(|s| s.and_then(|s| self.locations.span(s)))
-            .collect()
+impl VisitMut for Prepare<'_> {
+    fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
+        if let ast::Stmt::ForOf(iteration) = statement {
+            match self.lower_for_of(iteration.take()) {
+                Ok(lowered) => *statement = lowered,
+                Err(error) => {
+                    self.error.get_or_insert(error);
+                    return;
+                }
+            }
+        }
+        statement.visit_mut_children_with(self);
     }
 
-    pub fn witness_functions(
-        &self,
-    ) -> impl Iterator<Item = (Option<perry_hir::types::FuncId>, Option<&str>)> + '_ {
-        self.witnesses
-            .iter()
-            .map(|w| (w.target, w.is_destructor.then_some(w.name.as_str())))
+    fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
+        call.visit_mut_children_with(self);
+        methods::preserve_arguments(call, &self.analysis.classes);
+    }
+
+    fn visit_mut_class_prop(&mut self, prop: &mut ast::ClassProp) {
+        prop.visit_mut_children_with(self);
+        classes::preserve_field_type(prop);
     }
 }
 
-pub(crate) struct LoweredHir<'s> {
-    pub facts: crate::engine::boundary::SourceFacts,
-    pub module: HirModule,
-    pub metadata: Metadata<'s>,
-}
-
-pub(crate) fn lower<'s>(
+pub(crate) fn lower<'s, 'r>(
     loaded: modules::Loaded<'s>,
     identity: &str,
-    world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
-) -> Result<LoweredHir<'s>> {
+    world: Option<(&'r wit_parser::Resolve, wit_parser::WorldId)>,
+) -> Result<(crate::source::SourceModule<'s>, Vec<SourceWitness<'r>>)> {
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
-    let (mut constructors, witnesses) = GLOBALS.set(&Globals::new(), || {
+    let (witnesses, top_level) = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
-        ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
+        let top_level = Mark::new();
+        ast.visit_mut_with(&mut resolver(unresolved, top_level, true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
-        locations.collect(&ast, unresolved);
+        locations.collect(&ast);
         timers::check_imports(&ast, &locations)?;
-        regex::fold(&mut ast, unresolved);
-        let constructors = constructors::preserve(&mut ast, unresolved)?;
+        crate::source::Constructors::bind(&mut ast, unresolved, &locations)?;
         streams::preserve_options(&mut ast, unresolved, &locations)?;
         Ok::<_, Diagnostic>((
-            constructors,
-            witnesses::resolve(&ast, &loaded.exports, world, &locations, unresolved)?,
+            witnesses::resolve(&ast, &loaded.exports, world, &mut locations, unresolved)?,
+            SyntaxContext::empty().apply_mark(top_level),
         ))
     })?;
-    let facts = crate::engine::boundary::scan_ast(&ast);
-    let mut names = names::FreshNames::new(&ast);
-    streams::lower(&mut ast, &mut names)?;
-    methods::preserve_arguments(&mut ast, &mut names);
-    classes::preserve_field_types(&mut ast);
-    locations.preserve_expressions(&mut ast, &facts.expression_spans);
-    if !witnesses.witnesses.is_empty() {
-        perry_hir::ir::set_current_module_source(locations.module_text());
+    let mut analysis = crate::source::analyze(&mut ast, &mut locations, top_level);
+    let mut prepare = Prepare {
+        analysis: &mut analysis,
+        error: None,
+    };
+    ast.visit_mut_with(&mut prepare);
+    if let Some(error) = prepare.error {
+        return Err(error);
     }
+    perry_hir::ir::set_current_module_source(locations.module_text());
     let result = perry_hir::lower_module(&ast, "main", identity);
-    if !witnesses.witnesses.is_empty() {
-        perry_hir::ir::clear_current_module_source();
-    }
+    perry_hir::ir::clear_current_module_source();
     let mut module = result.map_err(|error| {
         let lower_error = error.downcast_ref::<perry_hir::error::LowerError>();
         let span = lower_error.and_then(|error| error.span);
@@ -140,76 +120,43 @@ pub(crate) fn lower<'s>(
     })?;
     for class in &mut module.classes {
         for field in &mut class.fields {
-            if field.is_private && field.name.starts_with('#') {
+            if private_field(field) {
                 field.name = perry_hir::private_names::private_value_key(class.id, &field.name);
             }
         }
     }
-    let witnesses = witnesses.in_hir(&mut module)?;
-    constructors.collect_types(&mut module)?;
-    let inferred_bindings = module
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| facts.is_inferred(span.start, span.end).then_some(*id))
-        .collect();
-    let deferred_bindings = module
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| facts.is_deferred(span.start).then_some(*id))
-        .collect();
-    let sparse_arrays = facts.sparse_arrays;
-    Ok(LoweredHir {
-        facts,
-        module,
-        metadata: Metadata {
-            witnesses,
-            resource_members: world
-                .map(|(r, w)| crate::wit::resource_members(r, w))
-                .unwrap_or_default(),
-            inline_callbacks: HashSet::new(),
-            locations,
-            inferred_bindings,
-            deferred_bindings,
-            constructors,
-            sparse_arrays,
-            class_origins: HashMap::new(),
-            json_eligible_bindings: HashSet::new(),
-        },
-    })
+    let witnesses = witnesses.in_hir(&mut module, &mut locations)?;
+    for (&id, text) in &module.closure_source_text {
+        if let Some((lo, hi)) = text.source_span {
+            let symbol = format!("callback_{id}");
+            let label = module
+                .closure_display_names
+                .get(&id)
+                .map_or("anonymous function", String::as_str);
+            locations.register_generated(
+                symbol,
+                swc_common::Span::new(swc_common::BytePos(lo), swc_common::BytePos(hi)),
+                label.to_owned(),
+            );
+        }
+    }
+    Ok((
+        crate::source::SourceModule::bind(module, analysis, locations, witnesses.resources),
+        witnesses.functions,
+    ))
 }
 
-/// Visit the declared names and whether a type annotation covers each binding.
-pub(crate) fn pattern_bindings<'a>(
-    pat: &'a perry_parser::swc_ecma_ast::Pat,
-    annotated: bool,
-    visit: &mut impl FnMut(&'a perry_parser::swc_ecma_ast::Ident, bool),
-) {
-    use perry_parser::swc_ecma_ast as ast;
-    match pat {
-        ast::Pat::Ident(binding) => visit(&binding.id, annotated || binding.type_ann.is_some()),
-        ast::Pat::Array(array) => {
-            for element in array.elems.iter().flatten() {
-                pattern_bindings(element, annotated || array.type_ann.is_some(), visit);
-            }
-        }
-        ast::Pat::Object(object) => {
-            let annotated = annotated || object.type_ann.is_some();
-            for prop in &object.props {
-                match prop {
-                    ast::ObjectPatProp::KeyValue(kv) => {
-                        pattern_bindings(&kv.value, annotated, visit)
-                    }
-                    ast::ObjectPatProp::Assign(assign) => visit(&assign.key.id, annotated),
-                    ast::ObjectPatProp::Rest(rest) => pattern_bindings(&rest.arg, annotated, visit),
-                }
-            }
-        }
-        ast::Pat::Rest(rest) => {
-            pattern_bindings(&rest.arg, annotated || rest.type_ann.is_some(), visit)
-        }
-        ast::Pat::Assign(assign) => pattern_bindings(&assign.left, annotated, visit),
-        ast::Pat::Invalid(_) | ast::Pat::Expr(_) => {}
-    }
+/// Perry supplies source spans for authored declarations and omits them for its temporaries.
+pub(crate) fn declaration_flags(
+    source: &crate::source::ModuleDeclarations,
+    id: LocalId,
+) -> crate::engine::types::LocalFlags {
+    source
+        .locals
+        .get(&id)
+        .map_or(crate::engine::types::LocalFlags::GENERATED, |local| {
+            local.flags
+        })
 }
 
 fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
@@ -239,13 +186,15 @@ pub(crate) fn is_object_literal(name: &str) -> bool {
     name.starts_with("__AnonShape_")
 }
 
-pub fn is_import_initializer(callee: &Expr) -> bool {
+pub(crate) fn is_import_initializer(callee: &Expr) -> bool {
     matches!(callee, Expr::ExternFuncRef { name, .. } if name == "js_native_module_named_esm_export_value")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::ConstructorSites;
+    use perry_hir::types::Type as HirType;
 
     #[test]
     fn constructor_preservation_respects_lexical_bindings() {
@@ -257,21 +206,23 @@ function builtin() { return new Set<string>(); }
 "#;
         let modules = std::collections::BTreeMap::new();
         let loaded = modules::load(source, "shadow.ts", &modules, &HashMap::new()).unwrap();
-        let lowered = lower(loaded, "shadow.ts", None).unwrap();
-        for function in &lowered.module.functions {
-            let Stmt::Return(Some(expr)) = &function.body[0] else {
+        let (lowered, _) = lower(loaded, "shadow.ts", None).unwrap();
+        for function in &lowered.bodies.functions {
+            let Stmt::Return(Some(expr), _) = &function.body[0] else {
                 panic!("expected constructor return");
             };
             if function.name == "builtin" {
                 assert!(matches!(
-                    lowered.metadata.constructors.get(expr),
-                    Some(Constructor::Set {
-                        element: Some(HirType::String),
-                        init: None
+                    crate::source::Constructors.collection(expr),
+                    Some(crate::source::Constructor {
+                        kind: crate::source::CollectionKind::Set,
+                        types: [HirType::String],
+                        init: None,
+                        ..
                     })
                 ));
             } else {
-                assert!(lowered.metadata.constructors.get(expr).is_none());
+                assert!(crate::source::Constructors.collection(expr).is_none());
                 let args = match expr {
                     Expr::New { args, .. } | Expr::NewDynamic { args, .. } => args,
                     other => panic!("unexpected shadowed constructor: {other:?}"),
@@ -285,44 +236,36 @@ function builtin() { return new Set<string>(); }
     }
 
     #[test]
-    fn generated_bindings_avoid_source_names() {
-        // Each source binds the name the first generated binding would take without a check.
-        for source in [
-            r#"function f(): string {
-                const __perry_arr_rest_1_ = "user";
-                const [first, ...others] = [1, 2].map((x) => x);
-                return __perry_arr_rest_1_;
-            }"#,
-            r#"function f(): string {
-                const __perry_loop_1_items = "user";
-                for (const x of [1, 2]) {}
-                return __perry_loop_1_items;
-            }"#,
-        ] {
-            let modules = std::collections::BTreeMap::new();
-            let loaded = modules::load(source, "names.ts", &modules, &HashMap::new()).unwrap();
-            let lowered = lower(loaded, "names.ts", None).unwrap();
-            let function = &lowered.module.functions[0];
-            let user = function.body.iter().find_map(|stmt| match stmt {
-                Stmt::Let {
-                    id,
-                    init: Some(Expr::String(value)),
-                    ..
-                } if value == "user" => Some(*id),
-                _ => None,
-            });
-            let returned = function.body.iter().find_map(|stmt| match stmt {
-                Stmt::Return(Some(Expr::LocalGet(id))) => Some(*id),
-                _ => None,
-            });
-            assert!(user.is_some(), "no user binding in {:?}", function.body);
-            assert_eq!(returned, user, "{source}");
-        }
+    fn typed_array_bindings_reach_perry_for_of() {
+        let source = r#"
+function walk<T>(items: T[]) {
+    const local: T[] = items, alias = local, literal = [1, 2];
+    for (const x of items) {}
+    for (const x of local) {}
+    for (const x of alias) {}
+    for (const x of literal) {}
+    { const items = "text"; for (const scalar of items) {} }
+}"#;
+        let modules = std::collections::BTreeMap::new();
+        let loaded = modules::load(source, "loops.ts", &modules, &HashMap::new()).unwrap();
+        let (lowered, _) = lower(loaded, "loops.ts", None).unwrap();
+        let adapted: Vec<_> = lowered
+            .declarations
+            .locals
+            .values()
+            .filter(|local| {
+                local
+                    .flags
+                    .contains(crate::engine::types::LocalFlags::FOR_OF)
+            })
+            .map(|local| lowered.locations.source_text(local.span).unwrap())
+            .collect();
+        assert_eq!(adapted, ["for (const scalar of items) {}"]);
     }
 }
 
 /// A key known without executing a computed property expression.
-pub fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
+pub(crate) fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
     use perry_hir::ir::ObjectPart;
     match part {
         ObjectPart::Define(name, _) => Some(name),
@@ -334,45 +277,15 @@ pub fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
     }
 }
 
-/// Object fields retained across Perry's duplicate-key and literal-class desugarings.
-pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
-    expr: &'s Expr,
-    literal_fields: F,
-) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s, F>> {
-    let (fields, defined, names, args) = match expr {
-        Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
-        Expr::ObjectSpread { parts }
-            if parts.iter().all(|part| static_property(part).is_some()) =>
-        {
-            (&[][..], &parts[..], &[][..], &[][..])
-        }
-        Expr::New {
-            class_name, args, ..
-        } => (&[][..], &[][..], literal_fields(class_name)?, &args[..]),
-        _ => return None,
-    };
-    Some(
-        fields
-            .iter()
-            .map(|(name, value)| (name.as_str(), value))
-            .chain(
-                defined
-                    .iter()
-                    .filter_map(|part| Some((static_property(part)?, part.value()))),
-            )
-            .chain(names.iter().copied().zip(args)),
-    )
-}
-
 #[derive(Clone, Copy)]
-pub enum ErrorClass {
+pub(crate) enum ErrorClass {
     Any,
     Type,
     Range,
     Reference,
     Syntax,
 }
-pub fn error_class(code: u32) -> Result<ErrorClass> {
+pub(crate) fn error_class(code: u32) -> Result<ErrorClass> {
     Ok(match code {
         0 => ErrorClass::Any,
         1 => ErrorClass::Type,
@@ -383,15 +296,14 @@ pub fn error_class(code: u32) -> Result<ErrorClass> {
     })
 }
 
-pub fn native_member_is_property(
-    receiver: crate::methods::Receiver,
-    name: &str,
-    arguments: &[Expr],
-) -> bool {
-    arguments.is_empty()
-        && crate::methods::Method::lookup(receiver, name)
-            .is_some_and(crate::methods::Method::is_property)
-}
-
 mod objects;
-pub use objects::init_fields;
+pub(crate) use objects::{literal_option, object_literal_pairs, read_file_text};
+
+pub(crate) fn tuple_position(index: &perry_hir::ir::Expr) -> Option<usize> {
+    use perry_hir::ir::Expr;
+    match index {
+        Expr::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
+        Expr::Integer(n) => usize::try_from(*n).ok(),
+        _ => None,
+    }
+}

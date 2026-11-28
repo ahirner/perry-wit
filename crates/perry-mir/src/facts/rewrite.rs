@@ -1,6 +1,6 @@
 //! Representation rewriting after ProgramFacts has converged.
 use super::{
-    ArgumentDomain, Constraint, Integer, ProgramFacts, SPECIALIZATION, WIT_SIGNATURE,
+    ArgumentDomain, Constraint, Integer, MirInteger, ProgramFacts, SPECIALIZATION, WIT_SIGNATURE,
     comparison_domain, literal,
 };
 use crate::{
@@ -17,9 +17,7 @@ use crate::{
 use pliron::{
     builtin::{
         attributes::{IdentifierAttr, IntegerAttr, TypeAttr},
-        op_interfaces::{
-            BranchOpInterface, OneRegionInterface, OneResultInterface, SymbolOpInterface,
-        },
+        op_interfaces::{OneResultInterface, SymbolOpInterface},
         ops::{ConstantOp, FuncOp},
         type_interfaces::FunctionTypeInterface,
         types::{FunctionType, IntegerType},
@@ -32,8 +30,7 @@ use pliron::{
         listener::DummyListener,
         rewriter::{IRRewriter, Rewriter},
     },
-    linked_list::ContainsLinkedList,
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
     pass::{AnalysisManager, PassResult},
     result::Result,
@@ -341,16 +338,9 @@ fn set_signature(ctx: &mut Context, imp: &Implementation) {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("lossless representation violated: {0}")]
 pub(crate) struct LosslessRepresentationErr(pub String);
-
-impl core::fmt::Display for LosslessRepresentationErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "lossless representation violated: {}", self.0)
-    }
-}
-
-impl core::error::Error for LosslessRepresentationErr {}
 
 fn is_fp64_carrier(ctx: &Context, ty: TypeHandle) -> bool {
     let inner = crate::optional::present_type(ctx, ty);
@@ -393,24 +383,9 @@ pub(crate) fn verify_lossless_module(
 /// (`perry.numeric` or 64-bit integer) result or field/element projection was degraded
 /// to a `builtin.fp64` carrier after all MIR passes complete.
 pub(crate) fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) -> Result<()> {
-    let functions = crate::aggregates::functions(root, ctx);
-    let by_name: HashMap<Identifier, FuncOp> = functions
-        .iter()
-        .map(|&f| (f.get_symbol_name(ctx), f))
-        .collect();
-    let entries = functions.iter().filter_map(|func| {
+    let active = crate::reachable_functions(ctx, root, |func| {
         (super::wit_signature(ctx, func).is_some() || super::is_entry(ctx, func))
-            .then(|| {
-                by_name
-                    .get(&super::specialized_implementation(ctx, func))
-                    .copied()
-            })
-            .flatten()
-    });
-    let active = crate::reachable(entries, |func| {
-        crate::aggregates::operations(ctx, &func)
-            .into_iter()
-            .filter_map(|op| by_name.get(&crate::calls::callee(ctx, op)?).copied())
+            .then(|| super::specialized_implementation(ctx, func))
     });
     active
         .into_iter()
@@ -420,7 +395,7 @@ pub(crate) fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) ->
 fn is_lossless_type(ctx: &Context, ty: TypeHandle) -> bool {
     let inner = crate::optional::present_type(ctx, ty);
     inner.deref(ctx).is::<crate::types::NumericType>()
-        || Integer::from_type(ctx, inner).is_some_and(|d| d.bits == 64)
+        || Integer::from_type(ctx, inner).is_some_and(|d| d.bits() == 64)
 }
 
 fn verify_lossless_function_ops(ctx: &Context, function: FuncOp) -> Result<()> {
@@ -487,13 +462,6 @@ fn verify_lossless_context(
     let key = &analysis.keys[id];
     let state = &analysis.states[id];
     let body = &analysis.bodies[&key.function];
-    let mut live_values = HashSet::new();
-    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        live_values.extend(block.deref(ctx).arguments());
-    }
-    for op in crate::aggregates::operations(ctx, &function) {
-        live_values.extend(op.deref(ctx).results());
-    }
     let entry = function.get_entry_block(ctx);
     let orig_arg_types = body.signature.deref(ctx).arg_types();
     for (pos, &param) in body.parameters.iter().enumerate() {
@@ -503,7 +471,7 @@ fn verify_lossless_context(
             .args
             .get(pos)
             .and_then(|a| a.integer())
-            .is_some_and(|d| d.bits == 64);
+            .is_some_and(|d| d.bits() == 64);
         if wide && is_fp64_carrier(ctx, arg_ty) {
             return fail(format!("64-bit parameter {pos} has f64 carrier"));
         }
@@ -539,6 +507,7 @@ fn verify_lossless_context(
         }
     }
     if let Some(mapping) = mapping {
+        let live_values: HashSet<_> = crate::function_values(ctx, &function);
         let values = state.values.keys().chain(
             state
                 .heap_values
@@ -555,7 +524,9 @@ fn verify_lossless_context(
             }
             let actual_ty = mapped.get_type(ctx);
             if can_specialize_value(ctx, state, orig_val)
-                && state.representation(orig_val).is_some_and(|d| d.bits == 64)
+                && state
+                    .representation(orig_val)
+                    .is_some_and(|d| d.bits() == 64)
                 && !orig_val.get_type(ctx).deref(ctx).is::<PromiseType>()
                 && is_fp64_carrier(ctx, actual_ty)
             {

@@ -1,77 +1,314 @@
 //! Data-oriented monomorphization and type-inference engine over dense indices.
-pub(crate) mod ast_scan;
-pub(crate) mod bitset;
+pub(crate) type BitSet = bit_set::BitSet<u64>;
 pub(crate) mod boundary;
 pub(crate) mod builtins;
-pub(crate) mod emit;
+mod instances;
+mod plans;
 pub(crate) mod solve;
 pub(crate) mod types;
 
-use crate::{hir, hir_compat};
-use boundary::{ModuleIndex, SourceFacts};
-use perry_hir::ir::Module as HirModule;
+use crate::source::SourceModule;
+use boundary::ModuleIndex;
 use perry_wit_diagnostics::Result;
+pub(crate) use plans::BodyOwner;
 use pliron::context::Context;
-use std::collections::HashMap;
 use types::TypeTable;
 
-/// Execute the new inference engine on a lowered HIR module.
-///
-/// Phase split: borrows `hir` read-only across boundary indexing, worklist solving, and
-/// monomorphic emission building, then applies the emitted outputs to `hir` and `metadata`.
-pub(crate) fn run_engine(
-    ctx: &mut Context,
-    hir: &mut HirModule,
-    metadata: &mut hir_compat::Metadata<'_>,
-    facts: &SourceFacts,
-    foreign: &HashMap<String, hir::Foreign>,
-) -> Result<()> {
-    let mut types = TypeTable::new();
-    let emitted = {
-        let index = ModuleIndex::build(ctx, hir, facts, &metadata.locations, &mut types);
-        let solved = solve::solve(ctx, hir, &index, metadata, facts, foreign, &mut types)?;
-        for (witness, instance) in metadata.witnesses.iter_mut().zip(&solved.witness_instances) {
-            witness.target = instance.map(|id| solved.instances[id].emitted_func_id);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CellInit {
+    AtDeclaration,
+    Deferred,
+    Hoisted,
+}
+
+impl CellInit {
+    pub(crate) fn admits_undefined(self) -> bool {
+        self != Self::AtDeclaration
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Storage {
+    ErasedFunction(Option<perry_hir::types::FuncId>),
+    Value(types::Ty),
+    Boxed { ty: types::Ty, init: CellInit },
+    Promise(types::Ty),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum InstanceResult {
+    Source,
+    Value(types::Ty),
+    ErasedFunction,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum NativeParam {
+    Value(types::Ty),
+    Argument { position: usize, ty: types::Ty },
+    Environment(types::FuncIdentity),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TimerSchedule {
+    pub(crate) repeats: bool,
+    pub(crate) has_delay: bool,
+}
+
+pub(crate) enum NativeBody {
+    Resource(crate::hir_compat::Target<types::InstanceId>),
+    Settle(perry_mir::SettleKind),
+    Helper(solve::HelperSpec),
+}
+
+pub(crate) struct NativeFunction {
+    pub(crate) name: String,
+    pub(crate) params: Vec<NativeParam>,
+    pub(crate) result: types::Ty,
+    pub(crate) is_async: bool,
+    pub(crate) body: NativeBody,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum EnvironmentField {
+    Capture {
+        local: perry_hir::types::LocalId,
+        ty: types::Ty,
+        cell: Option<CellInit>,
+    },
+    Receiver(types::Ty),
+    Settler(types::Ty),
+    Unit,
+}
+
+impl EnvironmentField {
+    pub(crate) fn storage(&self) -> Storage {
+        match *self {
+            Self::Capture { ty, cell, .. } => {
+                cell.map_or(Storage::Value(ty), |init| Storage::Boxed { ty, init })
+            }
+            Self::Receiver(ty) => Storage::Value(ty),
+            Self::Settler(ty) => Storage::Promise(ty),
+            Self::Unit => Storage::Value(types::Ty::NUMBER),
         }
-        emit::build(ctx, hir, &index, metadata, &types, &solved)?
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Environment {
+    pub(crate) record: pliron::r#type::TypedHandle<perry_mir::RecordType>,
+    pub(crate) fields: types::EnvFieldSpan,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClosureValue {
+    pub(crate) identity: types::FuncIdentity,
+    pub(crate) conversions: types::CaptureConversionSpan,
+}
+
+#[derive(Default)]
+pub(crate) struct CallTargets<T> {
+    instances: types::IdxVec<types::InstanceId, Option<T>>,
+    helpers: types::IdxVec<types::HelperId, Option<T>>,
+}
+
+impl<T: Copy> CallTargets<T> {
+    pub(crate) fn bind<U>(&self, f: impl Fn(T) -> Option<U>) -> CallTargets<U> {
+        CallTargets {
+            instances: self.instances.map(|id| id.and_then(&f)),
+            helpers: self.helpers.map(|id| id.and_then(&f)),
+        }
+    }
+
+    pub(crate) fn instance(&self, id: types::InstanceId) -> Result<T> {
+        self.instances[id]
+            .ok_or_else(|| perry_wit_diagnostics::internal!("missing emitted instance {id:?}"))
+    }
+
+    pub(crate) fn helper(&self, id: types::HelperId) -> Result<T> {
+        self.helpers[id]
+            .ok_or_else(|| perry_wit_diagnostics::internal!("missing emitted helper {id:?}"))
+    }
+
+    pub(crate) fn callee(&self, target: solve::FunctionTarget) -> Result<T> {
+        use solve::FunctionTarget::*;
+        match target {
+            Direct(id) | Closure(id) => self.instance(id),
+            Dispatcher(id) => self.helper(id),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct InstancePlans<'s> {
+    pub(crate) dispatch_arms: types::Pool<types::DispatchArmSpan, solve::DispatchArm>,
+    decisions: plans::Decisions<'s>,
+    pub(crate) targets: CallTargets<perry_hir::types::FuncId>,
+    pub(crate) locals: crate::hir_compat::Locals<'s>,
+    pub(crate) capture_conversions: types::Pool<
+        types::CaptureConversionSpan,
+        (perry_hir::types::LocalId, solve::ValueCoercion),
+    >,
+    pub(crate) environment_fields: types::Pool<types::EnvFieldSpan, EnvironmentField>,
+    pub(crate) environments: indexmap::IndexMap<types::FuncIdentity, Environment>,
+}
+
+pub(crate) struct Specialization<'s> {
+    pub(crate) templates: types::IdxVec<types::TemplateId, boundary::TemplateView<'s>>,
+    function_templates: Vec<Option<types::TemplateId>>,
+    pub(crate) writes: crate::narrowing::WriteEffects,
+    pub(crate) bodies: crate::source::InstanceBodies<'s>,
+    pub(crate) sparse_arrays: bool,
+    pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
+    pub(crate) dict_reads: BitSet,
+    pub(crate) capture_free: BitSet,
+
+    pub(crate) instances: InstancePlans<'s>,
+    pub(crate) resources: crate::hir_compat::ResourceClasses<types::ClassInstId>,
+}
+
+impl<'s> Specialization<'s> {
+    pub(crate) fn closure(
+        &self,
+        id: perry_hir::types::FuncId,
+    ) -> Option<(&boundary::TemplateView<'s>, plans::ExprIdx)> {
+        let template = self
+            .function_templates
+            .get(id as usize)
+            .copied()
+            .flatten()?;
+        let view = &self.templates[template];
+        let boundary::TemplateKind::Closure(site) = view.kind else {
+            return None;
+        };
+        Some((view, site))
+    }
+    pub(crate) fn closure_value(
+        &self,
+        owner: BodyOwner,
+        id: perry_hir::types::FuncId,
+    ) -> Option<ClosureValue> {
+        let (_, index) = self.closure(id)?;
+        self.instances.decisions.site_at(owner, index).environment()
+    }
+}
+
+pub(crate) fn lower_module<'r>(
+    ctx: &mut Context,
+    mut source: SourceModule<'_>,
+    exports: Vec<crate::hir_compat::SourceWitness<'r>>,
+    world: &crate::wit::WorldTypes<'_>,
+) -> Result<crate::LoweredProgram<'r>> {
+    let mut types = TypeTable::new();
+    let decls = crate::shapes::Declarations::new(
+        ctx,
+        &source.declarations.interfaces,
+        &source.declarations.type_aliases,
+        &source.declarations.imports,
+        &source.bodies.classes,
+        world,
+        &source.locations,
+    )?;
+    let mut index = ModuleIndex::build(
+        ctx,
+        &source.bodies,
+        &source.declarations,
+        &source.locations,
+        &decls,
+        &mut types,
+    );
+    let resources = std::mem::take(&mut source.resources);
+    let (solved, exports) = solve::solve(
+        ctx,
+        &source,
+        (exports, resources),
+        &index,
+        &decls,
+        &mut types,
+    )?;
+    let mut records = perry_mir::RecordLayouts::default();
+    let (bodies, mut instances, exports) = instances::build(
+        &source.bodies,
+        &mut source.locations,
+        &mut index,
+        &types,
+        (&solved, exports),
+        (ctx, &mut records),
+    )?;
+    drop(solved.inst_sites);
+    instances.dispatch_arms = solved.dispatch_arms;
+    let capture_free = index.capture_free_templates;
+    let specialization = Specialization {
+        resources: solved.resources,
+        templates: index.views,
+        function_templates: index.functions,
+        writes: solved.writes,
+        bodies,
+        sparse_arrays: source.sparse_arrays || solved.deletes_array_elements,
+        locations: solved.locations,
+        dict_reads: solved.dict_reads,
+        capture_free,
+
+        instances,
     };
-    emitted.apply(hir, metadata);
-    Ok(())
+    crate::lower::program::build_module(
+        ctx,
+        &source.declarations,
+        decls,
+        &mut source.locations,
+        &specialization,
+        exports,
+        (types, records),
+    )
+}
+
+impl<'s> InstancePlans<'s> {
+    pub(crate) fn expressions(&self) -> &plans::Expressions<'s> {
+        &self.decisions.expressions
+    }
+
+    pub(crate) fn storage(
+        &self,
+        owner: BodyOwner,
+        id: perry_hir::types::LocalId,
+    ) -> Option<Storage> {
+        self.decisions.storage(owner, self.locals.index(id)?)
+    }
+
+    pub(crate) fn globals(&self) -> impl Iterator<Item = perry_hir::types::LocalId> + '_ {
+        self.locals
+            .rows
+            .iter()
+            .filter(|local| local.flags.contains(types::LocalFlags::GLOBAL_SLOT))
+            .map(|local| local.id)
+    }
+    pub(crate) fn local(&self, id: perry_hir::types::LocalId) -> Result<&types::LocalInfo<'s>> {
+        Ok(&self.locals.rows[self.local_id(id)?])
+    }
+    fn local_id(&self, id: perry_hir::types::LocalId) -> Result<types::LocalIdx> {
+        self.locals
+            .index(id)
+            .ok_or_else(|| perry_wit_diagnostics::internal!("unindexed local {id}"))
+    }
+
+    pub(crate) fn site(
+        &self,
+        owner: BodyOwner,
+        expr: &perry_hir::ir::Expr,
+    ) -> Result<solve::SiteEntry> {
+        self.decisions
+            .site(owner, expr)
+            .ok_or_else(|| perry_wit_diagnostics::internal!("unindexed HIR expression {expr:?}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::bitset::BitSet;
-    use super::types::{FuncIdentity, ObjectProp, TemplateId, Ty, TypeTable};
+    use super::types::{FuncIdentity, TemplateId, Ty, TypeTable};
     use crate::Absence;
     use perry_hir::types::Type as HirType;
     use pliron::context::Context;
-    use std::collections::{BTreeMap, HashMap};
-
-    #[test]
-    fn bitset_operations_and_iteration() {
-        let mut a = BitSet::default();
-        assert!(a.is_empty());
-        assert!(a.insert(0));
-        assert!(!a.insert(0));
-        assert!(a.insert(63));
-        assert!(a.insert(64));
-        assert!(a.insert(129));
-        assert_eq!(a.iter().count(), 4);
-        assert!(a.contains(64));
-        assert!(!a.contains(65));
-        let bits: Vec<usize> = a.iter().collect();
-        assert_eq!(bits, vec![0, 63, 64, 129]);
-
-        assert!(a.remove(63));
-        assert!(!a.remove(63));
-        let mut b = BitSet::default();
-        b.insert(5);
-        b.insert(129);
-        assert!(a.union_with(&b));
-        assert!(!a.union_with(&b));
-        assert_eq!(a.iter().collect::<Vec<_>>(), vec![0, 5, 64, 129]);
-    }
+    use std::collections::BTreeMap;
 
     #[test]
     fn type_table_canonical_unions_and_joins() {
@@ -106,22 +343,15 @@ mod tests {
         });
         assert_ne!(f1, f2);
 
-        let (n_a, n_b) = (table.intern_name("a"), table.intern_name("b"));
-        let prop = |name, ty| ObjectProp {
-            name,
-            ty,
-            optional: false,
-            readonly: false,
-        };
-        let o1 = table.object(&[prop(n_b, Ty::STRING), prop(n_a, Ty::NUMBER)], None);
-        let o2 = table.object(&[prop(n_a, Ty::NUMBER), prop(n_b, Ty::STRING)], None);
+        let a = table.property("a", Ty::NUMBER, false);
+        let b = table.property("b", Ty::STRING, false);
+        let o1 = table.object(&[b, a], None);
+        let o2 = table.object(&[a, b], None);
         assert_ne!(o1, o2);
 
         let hir_u = HirType::Union(vec![HirType::String, HirType::Number, HirType::Void]);
         let interned = table.intern_hir(&ctx, &hir_u, true);
         assert_eq!(interned, u3);
-        let roundtrip = table.materialize_hir(&ctx, interned);
-        assert!(matches!(roundtrip, HirType::Union(ref members) if members.len() == 3));
 
         // Verify name interning roundtrips cleanly across many distinct identifiers.
         for i in 0..200u32 {
@@ -139,7 +369,7 @@ mod tests {
     #[test]
     fn engine_resolves_core_generics_storage_and_classes() {
         let empty_sources = BTreeMap::new();
-        let empty_foreign = HashMap::new();
+        let empty_foreign = Default::default();
         let samples = [
             (
                 "add.ts",
@@ -164,10 +394,10 @@ mod tests {
         ];
         for (name, src) in samples {
             let mut ctx = Context::new();
-            let program = crate::load_sources(&mut ctx, src, name, &empty_sources, &empty_foreign)
+            let module = crate::lower_sources(&mut ctx, src, name, &empty_sources, &empty_foreign)
                 .unwrap_or_else(|e| panic!("{name} failed: {e}"));
             assert!(
-                !program.module().functions.is_empty() || !program.module().classes.is_empty(),
+                !perry_mir::functions(pliron::op::Op::get_operation(&module), &ctx).is_empty(),
                 "{name}: expected emitted functions or classes"
             );
         }

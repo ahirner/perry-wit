@@ -14,18 +14,31 @@ use pliron::{
     result::Result,
     r#type::{TypeHandle, Typed},
     value::Value,
-    verify_err,
 };
 
+impl VariantType {
+    /// The case layout shared by tagged variants and JavaScript value unions.
+    pub fn of(ctx: &Context, ty: TypeHandle) -> Result<std::cell::Ref<'_, Self>> {
+        let variants = ty
+            .deref(ctx)
+            .downcast_ref::<crate::ValueUnionType>()
+            .map_or(ty, |union| union.variants());
+        std::cell::Ref::filter_map(variants.deref(ctx), |ty| ty.downcast_ref::<Self>())
+            .map_err(|_| pliron::verify_error_noloc!(InvalidVariant))
+    }
+
+    /// A known tag can have an empty payload.
+    pub fn case(&self, tag: &str) -> Option<Option<TypeHandle>> {
+        let index = self
+            .cases()
+            .binary_search_by(|(name, _)| name.as_str().cmp(tag))
+            .ok()?;
+        self.cases().get(index).map(|(_, payload)| *payload)
+    }
+}
+
 pub fn variant_cases(ctx: &Context, ty: TypeHandle) -> Result<Vec<(String, Option<TypeHandle>)>> {
-    let ty = ty.deref(ctx);
-    if let Some(union) = ty.downcast_ref::<crate::ValueUnionType>() {
-        return variant_cases(ctx, union.variants());
-    }
-    if let Some(variant) = ty.downcast_ref::<VariantType>() {
-        return Ok(variant.cases().to_vec());
-    }
-    verify_err!(pliron::location::Location::Unknown, InvalidVariant)
+    Ok(VariantType::of(ctx, ty)?.cases().to_vec())
 }
 
 pub fn value_tag(ctx: &Context, ty: TypeHandle) -> Option<&'static str> {
@@ -50,16 +63,9 @@ pub fn value_tag(ctx: &Context, ty: TypeHandle) -> Option<&'static str> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("variant operation has an invalid tag or payload type")]
 struct InvalidVariant;
-
-impl core::fmt::Display for InvalidVariant {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("variant operation has an invalid tag or payload type")
-    }
-}
-
-impl core::error::Error for InvalidVariant {}
 
 op_schema! {
     pub VariantNewOp(..operands) -> infallible;
@@ -75,15 +81,13 @@ op_schema! {
     prepare(this) {
         <Self as OneResultInterface>::verify(this, ctx)?;
         let ty = this.get_result(ctx).get_type(ctx);
-        let cases = variant_cases(ctx, ty)?;
+        let variant = VariantType::of(ctx, ty)?;
     }
     result(ctx, ty: TypeHandle): TypeHandle = ty;
     error = InvalidVariant;
-    check cases.iter().any(|(name, payload)| {
-        name == tag.as_str()
-            && (Signature { inputs: payload.iter().copied(), outputs: [ty] })
-                .accepts(ctx, operands)
-    }) => InvalidVariant;
+    check variant.case(tag.as_str()).is_some_and(|payload|
+        (Signature { inputs: payload, outputs: [ty] }).accepts(ctx, operands)
+    ) => InvalidVariant;
 }
 
 op_schema! {
@@ -93,7 +97,7 @@ op_schema! {
     constructors { pub new(value: Value) => infer(); }
     result(ctx): Ty = Ty::String;
     error = InvalidVariant;
-    check_before variant_cases(ctx, value.get_type(ctx)).is_ok() => InvalidVariant;
+    check_before VariantType::of(ctx, value.get_type(ctx)).is_ok() => InvalidVariant;
 }
 
 pub fn admits_payload(ctx: &Context, result: TypeHandle, payload: Option<TypeHandle>) -> bool {

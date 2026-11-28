@@ -69,10 +69,7 @@ impl FunctionLowering<'_, '_> {
                 let thirty_two = self.i64_const(ctx, 32);
                 let error = self.num(ctx, NumOpcode::I64ShrU, vec![packed, thirty_two]);
                 let error = self.num(ctx, NumOpcode::I32WrapI64, vec![error]);
-                let failed = self.new_block(ctx, vec![]);
-                let formatted = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, error, (failed, vec![]), (formatted, vec![]));
-                self.block = failed;
+                let formatted = self.enter_if(ctx, error);
                 let merged_type = i32_type(ctx);
                 let merged = self.new_block(ctx, vec![merged_type]);
                 if intrinsic == Intrinsic::DateIso {
@@ -86,9 +83,7 @@ impl FunctionLowering<'_, '_> {
                 self.block = formatted;
                 let len = self.num(ctx, NumOpcode::I32WrapI64, vec![packed]);
                 let text = self.runtime(ctx, Runtime::StringAdopt, vec![out, len]);
-                self.br(ctx, merged, vec![text]);
-                self.block = merged;
-                merged.deref(ctx).get_argument(0)
+                self.join_value(ctx, merged, text)
             }
             other => bail_internal!("{other:?} is not a date intrinsic"),
         })

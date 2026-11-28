@@ -1,0 +1,528 @@
+//! Value kinds and the ECMAScript conversions between typed MIR values.
+use super::*;
+
+#[derive(Clone, Copy)]
+pub(super) enum DisplayMode {
+    String,
+    Console,
+}
+
+pub(super) fn is_integer64(ctx: &Context, ty: TypeHandle) -> bool {
+    ty.deref(ctx)
+        .downcast_ref::<IntegerType>()
+        .is_some_and(|integer| integer.width() == 64)
+}
+
+/// `ty` widened to also admit `state`: `T | undefined` from `T`, and `T | null | undefined`
+/// from `T | null`.
+pub(super) fn admitting(ctx: &Context, ty: TypeHandle, state: perry_mir::Absence) -> TypeHandle {
+    let states = absence(ctx, ty).map_or(state, |existing| existing.join(state));
+    let inner = present_type(ctx, ty);
+    perry_mir::OptionalType::get_with(ctx, inner, states).into()
+}
+
+pub(super) fn result_carrier(
+    ctx: &mut Context,
+    solved: TypeHandle,
+    operands: &[Value],
+) -> TypeHandle {
+    if !admits_undefined(ctx, solved)
+        && !solved.deref(ctx).is::<JsonType>()
+        && operands
+            .iter()
+            .any(|v| admits_undefined(ctx, v.get_type(ctx)))
+    {
+        admitting(ctx, solved, perry_mir::Absence::Undefined)
+    } else {
+        solved
+    }
+}
+
+pub(super) use crate::methods::Kind;
+
+pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
+    Kind::of(ctx, value.get_type(ctx))
+        .ok_or_else(|| Diagnostic::unsupported("unsupported value type in expression"))
+}
+
+impl<'s> FunctionBuilder<'s, '_> {
+    /// Exact integer fields and assignments expose their values as source BigInts.
+    pub(super) fn bigint_view(&mut self, ctx: &mut Context, value: Value) -> Value {
+        if is_integer64(ctx, value.get_type(ctx)) {
+            let bigint = BigIntType::get(ctx).into();
+            self.emit_value(NumericCastOp::new(ctx, value, bigint), ctx)
+        } else {
+            value
+        }
+    }
+
+    pub(super) fn is_optional(&self, ctx: &Context, value: Value) -> bool {
+        optional_value(ctx, value.get_type(ctx)).is_some()
+    }
+
+    /// ECMAScript coercion of `T | undefined` for arithmetic, ordering and concatenation:
+    /// `undefined` becomes `NaN` or `"undefined"`. Other values pass through.
+    pub(super) fn arithmetic(&mut self, ctx: &mut Context, value: Value) -> Value {
+        if value.get_type(ctx).deref(ctx).is::<JsonType>() {
+            return self.intrinsic(ctx, Intrinsic::JsonToNumber, vec![value]);
+        }
+        let Some(inner) = optional_value(ctx, value.get_type(ctx)) else {
+            return value;
+        };
+        if inner.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
+            self.emit_value(ToNumberOp::new(ctx, value), ctx)
+        } else if inner.deref(ctx).is::<StringType>() {
+            self.emit_value(ToStringOp::new(ctx, value), ctx)
+        } else {
+            value
+        }
+    }
+
+    /// Extract the defined value of `T | undefined`, throwing `TypeError` on `undefined`.
+    pub(super) fn defined(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if !self.is_optional(ctx, value) {
+            return Ok(value);
+        }
+        let op = UnwrapOp::new(ctx, value).to_diag(ctx)?;
+        Ok(self.emit_value(op, ctx))
+    }
+
+    /// [`Self::defined`] for a property receiver; MIR rejects one that may still be `null`.
+    pub(super) fn receiver(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        byte_offset: u32,
+    ) -> Result<Value> {
+        if !self.is_optional(ctx, value) {
+            return Ok(value);
+        }
+        let locations = &self.shapes.locations;
+        let op =
+            UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset)).to_diag(ctx)?;
+        Ok(self.emit_value(op, ctx))
+    }
+
+    /// Dispatch an optional value, unwrapping only on its present branch.
+    pub(super) fn match_optional(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        target: TypeHandle,
+        undefined: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+        null: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
+        present: impl FnOnce(&mut Self, &mut Context, Value) -> Result<Value>,
+    ) -> Result<Value> {
+        let is_undefined = self.emit_value(IsUndefinedOp::new(ctx, value), ctx);
+        self.choose(ctx, target, is_undefined, undefined, |b, ctx| {
+            let is_null = b.emit_value(IsNullOp::new(ctx, value), ctx);
+            b.choose(ctx, target, is_null, null, |b, ctx| {
+                let defined = b.defined(ctx, value)?;
+                present(b, ctx, defined)
+            })
+        })
+    }
+
+    /// View `value` with `undefined` excluded from its absence states (after a `!== undefined` check).
+    pub(super) fn strip_undefined(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let ty = value.get_type(ctx);
+        match optional_parts(ctx, ty) {
+            Some((_, perry_mir::Absence::Undefined)) => self.defined(ctx, value),
+            Some((inner, perry_mir::Absence::Both)) => {
+                let target =
+                    perry_mir::OptionalType::get_with(ctx, inner, perry_mir::Absence::Null).into();
+                let is_null = self.emit_value(IsNullOp::new(ctx, value), ctx);
+                self.choose(
+                    ctx,
+                    target,
+                    is_null,
+                    |b, ctx| Ok(b.emit_value(NullOp::new(ctx, target), ctx)),
+                    |b, ctx| {
+                        let defined = b.defined(ctx, value)?;
+                        b.fit(ctx, defined, target)
+                    },
+                )
+            }
+            _ => Ok(value),
+        }
+    }
+
+    /// View `value` as `T | undefined`.
+    pub(super) fn optional(&mut self, ctx: &mut Context, value: Value) -> Value {
+        if self.is_optional(ctx, value) {
+            value
+        } else {
+            self.emit_value(WrapOp::new(ctx, value), ctx)
+        }
+    }
+
+    /// Convert `value` to the type of a typed boundary: wrap into `T | undefined`, or unwrap
+    /// (throwing `TypeError` on `undefined`) where `T` is required.
+    pub(super) fn fit(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        target: TypeHandle,
+    ) -> Result<Value> {
+        let ty = value.get_type(ctx);
+        let wanted = present_type(ctx, target);
+        if ty != target
+            && self.is_optional(ctx, value)
+            && (crate::lower::value_unions::is_value_union(ctx, ty)
+                || crate::lower::value_unions::is_value_union(ctx, target))
+        {
+            let Some(states) = absence(ctx, target) else {
+                let value = self.defined(ctx, value)?;
+                return self.fit(ctx, value, target);
+            };
+            return self.match_optional(
+                ctx,
+                value,
+                target,
+                |b, ctx| {
+                    if states.admits_undefined() {
+                        Ok(b.emit_value(UndefinedOp::with_type(ctx, target), ctx))
+                    } else {
+                        let value = b.defined(ctx, value)?;
+                        b.fit(ctx, value, target)
+                    }
+                },
+                |b, ctx| {
+                    if states.admits_null() {
+                        Ok(b.emit_value(NullOp::new(ctx, target), ctx))
+                    } else {
+                        let value = b.defined(ctx, value)?;
+                        b.fit(ctx, value, target)
+                    }
+                },
+                |b, ctx, value| b.fit(ctx, value, target),
+            );
+        }
+        if ty != target
+            && crate::lower::value_unions::is_value_union(ctx, wanted)
+            && let Some(tag) = perry_mir::value_tag(ctx, ty)
+        {
+            let payload = perry_mir::VariantType::of(ctx, wanted)
+                .to_diag(ctx)?
+                .case(tag)
+                .flatten()
+                .ok_or_else(|| {
+                    Diagnostic::new(codes::TYPE_MISMATCH, "value is outside the finite union")
+                })?;
+            ensure_diag!(
+                tag != "object" || ty == payload || perry_mir::can_widen(ctx, ty, payload),
+                codes::TYPE_MISMATCH,
+                "record alternatives must preserve their layout and identity"
+            );
+            let value = self.fit(ctx, value, payload)?;
+            let boxed = self.emit_value(
+                perry_mir::VariantNewOp::new(ctx, wanted, tag, Some(value)),
+                ctx,
+            );
+            return self.fit(ctx, boxed, target);
+        }
+        if !crate::lower::value_unions::is_value_union(ctx, wanted)
+            && crate::lower::value_unions::is_value_union(ctx, ty)
+            && perry_mir::VariantType::of(ctx, present_type(ctx, ty))
+                .to_diag(ctx)?
+                .cases()
+                .iter()
+                .any(|(_, payload)| *payload == Some(wanted))
+        {
+            let value = self.defined(ctx, value)?;
+            let payload =
+                self.emit_value(perry_mir::VariantPayloadOp::new(ctx, value, wanted), ctx);
+            return self.fit(ctx, payload, target);
+        }
+        if target.deref(ctx).is::<perry_mir::ByteInputType>() {
+            let convert = if ty.deref(ctx).is::<StringType>() {
+                Some(Intrinsic::StringByteInput)
+            } else if ty.deref(ctx).is::<BytesType>() {
+                Some(Intrinsic::BytesByteInput)
+            } else {
+                None
+            };
+            if let Some(convert) = convert {
+                return Ok(self.intrinsic(ctx, convert, vec![value]));
+            }
+        }
+        if ty.deref(ctx).is::<JsonType>()
+            && ty != target
+            && perry_mir::JsonSchema::supports_descriptor(ctx, target)
+        {
+            return self.decode_json(ctx, value, target);
+        }
+        let thrown = present_type(ctx, ty);
+        let wanted = present_type(ctx, target);
+        if thrown.deref(ctx).is::<ExceptionType>() && thrown != wanted {
+            // A thrown value (a rejection's `reason`) used as a number or string must be one.
+            let intrinsic = if wanted.deref(ctx).is::<FP64Type>() {
+                Intrinsic::ExceptionToNumber
+            } else if wanted.deref(ctx).is::<StringType>() {
+                Intrinsic::ExceptionToString
+            } else if wanted.deref(ctx).is::<IntegerType>() {
+                Intrinsic::ExceptionToBool
+            } else {
+                bail_unsupported!("thrown values require a supported scalar type")
+            };
+            let exception = self.defined(ctx, value)?;
+            let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
+            return self.fit(ctx, converted, target);
+        }
+        if (thrown.deref(ctx).is::<BigIntType>() && is_integer64(ctx, wanted))
+            || (is_integer64(ctx, thrown) && wanted.deref(ctx).is::<BigIntType>())
+        {
+            let defined = self.defined(ctx, value)?;
+            let casted = self.emit_value(NumericCastOp::new(ctx, defined, wanted), ctx);
+            return self.fit(ctx, casted, target);
+        }
+        if ty == target {
+            Ok(value)
+        } else if target.deref(ctx).is::<JsonType>()
+            && let Some(json) = self.json_operand(ctx, value)?
+        {
+            Ok(json)
+        } else if wanted.deref(ctx).is::<JsonType>() && !thrown.deref(ctx).is::<JsonType>() {
+            let boxed = self.emit_value(perry_mir::JsonBoxOp::new(ctx, value), ctx);
+            self.fit(ctx, boxed, target)
+        } else if optional_value(ctx, target) == Some(ty) {
+            Ok(self.emit_value(WrapOp::with_type(ctx, value, target), ctx))
+        } else if optional_value(ctx, target).is_some()
+            && optional_value(ctx, target) == optional_value(ctx, ty)
+        {
+            Ok(self.emit_value(OptionalCastOp::new(ctx, value, target), ctx))
+        } else if optional_value(ctx, ty) == Some(target) {
+            self.defined(ctx, value)
+        } else if perry_mir::can_widen(ctx, ty, target) {
+            Ok(self.emit_value(perry_mir::AggregateViewOp::new(ctx, value, target), ctx))
+        } else {
+            // A value that never materializes takes any type.
+            if self.never_values.contains(&value) {
+                return Ok(if admits_undefined(ctx, target) {
+                    self.emit_value(UndefinedOp::with_type(ctx, target), ctx)
+                } else {
+                    self.emit_value(UndefOp::new(ctx, target), ctx)
+                });
+            }
+            let source = present_type(ctx, ty);
+            let wanted = present_type(ctx, target);
+            if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
+                && let Some(dst_rec) = record_projection(ctx, source, wanted)
+                && (!dst_rec.deref(ctx).fields().to_diag(ctx)?.is_empty()
+                    || self.shapes.class_of_type(ctx, wanted).is_some())
+            {
+                return self.project_record(ctx, value, ty == source, dst_rec, target);
+            }
+            let actual = self.shapes.describe_type(ctx, ty);
+            let expected = self.shapes.describe_type(ctx, target);
+            bail_diag!(
+                codes::TYPE_MISMATCH,
+                "value type {actual} differs from the expected type {expected}"
+            )
+        }
+    }
+
+    /// An expression that must be a string (`undefined` throws `TypeError`).
+    pub(super) fn string_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        self.typed_operand(ctx, expr, Kind::String, "a string")
+    }
+
+    /// An ECMAScript number used as an array index (out-of-bounds reads yield `undefined`).
+    pub(super) fn index(&mut self, ctx: &mut Context, index: &'s Expr) -> Result<Value> {
+        let index = self.expression(ctx, index)?;
+        let index = self.arithmetic(ctx, index);
+        ensure_diag!(
+            kind(ctx, index)? == Kind::Number,
+            codes::TYPE_MISMATCH,
+            "array indices must be numbers"
+        );
+        Ok(index)
+    }
+
+    /// An expression used as a number (`undefined` becomes `NaN`).
+    pub(super) fn number_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        let value = self.expression(ctx, expr)?;
+        self.require_number(ctx, value)
+    }
+
+    pub(super) fn require_number(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let value = self.arithmetic(ctx, value);
+        ensure_diag!(
+            kind(ctx, value)? == Kind::Number,
+            codes::TYPE_MISMATCH,
+            "a number is required here"
+        );
+        Ok(value)
+    }
+
+    /// An optional numeric argument, or `default`.
+    pub(super) fn number_or(
+        &mut self,
+        ctx: &mut Context,
+        expr: Option<&'s Expr>,
+        default: f64,
+    ) -> Result<Value> {
+        match expr {
+            Some(Expr::Undefined) | None => Ok(self.number(ctx, default)),
+            Some(expr) => self.number_operand(ctx, expr),
+        }
+    }
+
+    pub(super) fn typed_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        want: Kind,
+        what: &str,
+    ) -> Result<Value> {
+        let value = self.expression(ctx, expr)?;
+        let value = self.defined(ctx, value)?;
+        ensure_diag!(
+            kind(ctx, value)? == want,
+            codes::TYPE_MISMATCH,
+            "{what} is required here"
+        );
+        Ok(value)
+    }
+
+    /// ECMAScript `ToString` of a primitive, as `console.log` and `+` display it.
+    pub(super) fn display(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        self.display_as(ctx, value, DisplayMode::String)
+    }
+
+    pub(super) fn display_as(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        mode: DisplayMode,
+    ) -> Result<Value> {
+        if let Some(inner) = optional_value(ctx, value.get_type(ctx)) {
+            if inner.deref(ctx).is::<StringType>() {
+                return Ok(self.emit_value(ToStringOp::new(ctx, value), ctx));
+            }
+            let ty = StringType::get(ctx).into();
+            return self.match_optional(
+                ctx,
+                value,
+                ty,
+                |b, ctx| Ok(b.string(ctx, "undefined")),
+                |b, ctx| Ok(b.string(ctx, "null")),
+                |b, ctx, defined| b.display_as(ctx, defined, mode),
+            );
+        }
+        Ok(match kind(ctx, value)? {
+            Kind::ValueUnion => {
+                let result = StringType::get(ctx).into();
+                self.dispatch_value(ctx, value, result, &|b, ctx, value| {
+                    let value = b.value_primitive(ctx, value)?;
+                    b.display_as(ctx, value, mode)
+                })?
+            }
+            Kind::BigInt => {
+                let value = self.bigint_view(ctx, value);
+                self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value])
+            }
+            Kind::String => value,
+            Kind::Exception => self.intrinsic(ctx, Intrinsic::ExceptionDisplay, vec![value]),
+            Kind::Json => self.intrinsic(ctx, Intrinsic::JsonDisplay, vec![value]),
+            Kind::Number => self.intrinsic(
+                ctx,
+                match mode {
+                    DisplayMode::String => Intrinsic::NumberToString,
+                    DisplayMode::Console => Intrinsic::NumberInspect,
+                },
+                vec![value],
+            ),
+            Kind::Boolean => self.choose_string(
+                ctx,
+                value,
+                |b, ctx| Ok(b.string(ctx, "true")),
+                |b, ctx| Ok(b.string(ctx, "false")),
+            )?,
+            _ => bail_unsupported!(
+                "only strings, numbers and booleans can be converted to strings yet"
+            ),
+        })
+    }
+
+    /// `typeof value`, including the active case of a closed primitive union.
+    pub(super) fn type_of(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if optional_value(ctx, value.get_type(ctx)).is_some() {
+            let ty = StringType::get(ctx).into();
+            return self.match_optional(
+                ctx,
+                value,
+                ty,
+                |b, ctx| Ok(b.string(ctx, "undefined")),
+                |b, ctx| Ok(b.string(ctx, "object")),
+                |b, ctx, defined| b.type_of(ctx, defined),
+            );
+        }
+        let name = match kind(ctx, value)? {
+            Kind::ValueUnion => {
+                return Ok(self.emit_value(perry_mir::VariantTagOp::new(ctx, value), ctx));
+            }
+            Kind::BigInt => "bigint",
+            Kind::Number => "number",
+            Kind::String => "string",
+            Kind::Boolean => "boolean",
+            Kind::Json => {
+                return Ok(self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![value]));
+            }
+            _ => "object",
+        };
+        Ok(self.string(ctx, name))
+    }
+}
+
+/// A named destination record whose fields all exist in the named source record.
+fn record_projection(
+    ctx: &Context,
+    source: TypeHandle,
+    wanted: TypeHandle,
+) -> Option<TypedHandle<RecordType>> {
+    let src_rec = perry_mir::typed::<RecordType>(ctx, source)?;
+    let dst_rec = perry_mir::typed::<RecordType>(ctx, wanted)?;
+    let (src, dst) = (src_rec.deref(ctx), dst_rec.deref(ctx));
+    if src.is_tuple() || dst.is_tuple() {
+        return None;
+    }
+    let fields = src.fields().ok()?;
+    dst.fields()
+        .ok()?
+        .iter()
+        .all(|(name, _)| fields.iter().any(|(source, _)| source == name))
+        .then_some(dst_rec)
+}
+
+/// The settled type of `Promise<void>`: `undefined` as `number | undefined`.
+pub(super) fn void_type(ctx: &Context) -> TypeHandle {
+    let number = FP64Type::get(ctx).into();
+    perry_mir::OptionalType::get(ctx, number).into()
+}
+
+impl Shapes<'_> {
+    fn describe_type(&self, ctx: &Context, ty: TypeHandle) -> String {
+        if let Some(map) = self.boxed_collection(ctx, ty, crate::source::CollectionKind::Map) {
+            let [k, v] = map.fields;
+            format!(
+                "Map<{}, {}>",
+                self.describe_type(ctx, k),
+                self.describe_type(ctx, v)
+            )
+        } else if self
+            .boxed_collection(ctx, ty, crate::source::CollectionKind::Set)
+            .is_some()
+        {
+            "Set".into()
+        } else if let Some((k, v, _)) = super::collections::dict_entry_types(ctx, ty) {
+            format!(
+                "Record<{}, {}>",
+                self.describe_type(ctx, k),
+                self.describe_type(ctx, v)
+            )
+        } else {
+            ty.disp(ctx).to_string()
+        }
+    }
+}
