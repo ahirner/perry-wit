@@ -186,13 +186,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if src_ty == Ty::BOTTOM || !matches!(self.types.kind(dst_ty), TyKind::Union(_)) {
             return;
         }
-        let inner = match expr {
-            Expr::Sequence(parts) if self.hir.locations.operator_span(parts).is_some() => {
-                parts.last().unwrap_or(expr)
-            }
-            _ => expr,
-        };
-        if matches!(inner, Expr::Conditional { .. } | Expr::Logical { .. }) {
+        if matches!(expr, Expr::Conditional { .. } | Expr::Logical { .. }) {
             return;
         }
         self.track_function_escapes(dst_ty, inst_id);

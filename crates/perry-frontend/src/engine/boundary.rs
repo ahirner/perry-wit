@@ -283,7 +283,7 @@ impl<'h> ModuleIndex<'h> {
             result,
         ));
         self.set_func_template(func.id, tid);
-        self.scan_params(scan, &func.params, tid, &[]);
+        self.scan_params(scan, &func.params, tid);
         self.scan_stmts(scan, self.view(tid).body, tid, false);
         tid
     }
@@ -329,22 +329,15 @@ impl<'h> ModuleIndex<'h> {
         })
     }
 
-    fn scan_params(
-        &mut self,
-        scan: &mut ScanCtx<'h, '_>,
-        params: &'h [Param],
-        owner: TemplateId,
-        authored_types: &[perry_hir::types::Type],
-    ) {
+    fn scan_params(&mut self, scan: &mut ScanCtx<'h, '_>, params: &'h [Param], owner: TemplateId) {
         self.register_type_params(
             scan.ctx,
             GenericOwner::Function(owner),
             self.view(owner).type_params,
         );
-        for (position, param) in params.iter().enumerate() {
+        for param in params {
             let mut flags = hir_compat::declaration_flags(scan.declarations, param.id);
-            let authored = authored_types.get(position).unwrap_or(&param.ty);
-            let annotation = scan.types.intern_hir(scan.ctx, authored, true);
+            let annotation = scan.types.intern_hir(scan.ctx, &param.ty, true);
             let declared = if flags.contains(LocalFlags::PARAM_ANNOTATED) {
                 annotation
             } else {
@@ -433,7 +426,7 @@ impl<'h> ModuleIndex<'h> {
                     scan.defined_locals.insert(*id as usize);
                     FALLTHROUGH
                 }
-                Stmt::Return(Some(val)) => {
+                Stmt::Return(Some(val), _) => {
                     if matches!(val, Expr::Array(items, _) if items.is_empty()) {
                         self.returns_empty_list.insert(owner.index());
                     }
@@ -444,13 +437,16 @@ impl<'h> ModuleIndex<'h> {
                         RETURN
                     }
                 }
-                Stmt::Return(None) => RETURN | EMPTY_RETURN,
+                Stmt::Return(None, _) => RETURN | EMPTY_RETURN,
                 Stmt::Break => BREAK,
                 Stmt::Continue => CONTINUE,
                 Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => LABELLED,
                 Stmt::Throw(value) => {
                     self.scan_expr(scan, value, owner, in_loop);
                     RETURN
+                }
+                _ if let Some(branch) = self.locals.dense_statements(stmt) => {
+                    self.scan_stmts(scan, branch, owner, in_loop)
                 }
                 Stmt::If {
                     condition,
@@ -518,6 +514,7 @@ impl<'h> ModuleIndex<'h> {
                 Stmt::Switch {
                     discriminant,
                     cases,
+                    ..
                 } => {
                     self.scan_expr(scan, discriminant, owner, in_loop);
                     let mut branches = FALLTHROUGH;
@@ -645,6 +642,7 @@ impl<'h> ModuleIndex<'h> {
                     SiteResolution::CollectionNew(scan.types.generic(base, &args)),
                 );
             }
+            Expr::NativeMethodCall { .. } => self.locals.index_iterator_value(expr),
             _ => {}
         }
         if let Some(method) = crate::methods::StaticMethod::select(expr, scan.types) {
@@ -683,6 +681,7 @@ impl<'h> ModuleIndex<'h> {
                 condition,
                 then_expr,
                 else_expr,
+                ..
             } => {
                 self.scan_test(scan, condition, owner, in_loop);
                 self.scan_expr(scan, then_expr, owner, in_loop);
@@ -707,6 +706,7 @@ impl<'h> ModuleIndex<'h> {
             }
             Expr::Closure {
                 func_id,
+                type_params,
                 params,
                 return_type,
                 body,
@@ -720,28 +720,25 @@ impl<'h> ModuleIndex<'h> {
                 ..
             } => {
                 self.max_func_id = self.max_func_id.max(*func_id);
-                let declaration = scan.declarations.closures.get(func_id);
-                let signature = declaration.and_then(|decl| decl.signature.as_ref());
-                let (result, params_ty) = signature
-                    .and_then(|alias| match &alias.ty {
-                        perry_hir::types::Type::Tuple(types) => types.split_last(),
-                        _ => None,
-                    })
-                    .unwrap_or((return_type, &[]));
                 let exp_ret = !matches!(
-                    result,
+                    return_type,
                     perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
                 );
                 let body = crate::source::authored_body(params, body);
                 let tid = self.add_template(TemplateView {
                     kind: TemplateKind::Closure(site),
-                    name: declaration.map_or("", |decl| decl.name.as_str()).into(),
+                    name: scan
+                        .declarations
+                        .closure_names
+                        .get(func_id)
+                        .map_or("", String::as_str)
+                        .into(),
                     func_id: *func_id,
                     params: params.as_slice(),
-                    result: scan.types.intern_hir(scan.ctx, result, true),
+                    result: scan.types.intern_hir(scan.ctx, return_type, true),
                     body,
                     captures: captures.as_slice(),
-                    type_params: signature.map_or(&[], |s| s.type_params.as_slice()),
+                    type_params,
                     is_async: *is_async,
                     is_generator: *is_generator,
 
@@ -763,7 +760,7 @@ impl<'h> ModuleIndex<'h> {
                     let forward = !scan.defined_locals.contains(cap as usize);
                     scan.pending_captures.push((cap, true, forward));
                 }
-                self.scan_params(scan, params, tid, params_ty);
+                self.scan_params(scan, params, tid);
                 self.scan_stmts(scan, body, tid, false);
                 let lexical_this = *is_arrow && (*captures_this || self.views[tid].uses_this);
                 self.views[tid].captures_this = lexical_this;
@@ -802,9 +799,7 @@ impl<'h> ModuleIndex<'h> {
                 }
             }
         }
-        if let Some(binding) =
-            crate::wit::BoundMember::at(scan.ctx, expr, scan.decls, scan.locations)
-        {
+        if let Some(binding) = crate::wit::BoundMember::at(scan.ctx, expr, scan.decls) {
             match binding {
                 crate::wit::BoundMember::Static(id) => self
                     .expressions
@@ -839,7 +834,6 @@ struct ScanCtx<'h, 'a> {
     static_uses: Vec<(ExprIdx, &'h str, &'h str)>,
     literals: HashMap<&'h str, &'h [perry_hir::ir::ClassField]>,
     decls: &'a crate::shapes::Declarations<'h>,
-    locations: &'a hir_compat::Locations<'a>,
     strings: crate::source::ConstantStrings<'h>,
     regex_constructors: Vec<(ExprIdx, crate::source::RegExpArguments<'h>)>,
     ctx: &'a Context,

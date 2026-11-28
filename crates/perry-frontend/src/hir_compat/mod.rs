@@ -4,13 +4,15 @@ use perry_hir::{
     ir::{CompareOp, Expr, Stmt},
     types::LocalId,
 };
+use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
 #[cfg(test)]
 use std::collections::HashMap;
+use swc_common::util::take::Take;
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
-use swc_ecma_visit::VisitMutWith;
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 mod calls;
 mod classes;
@@ -21,7 +23,6 @@ pub(crate) use calls::{
 pub(crate) use classes::{direct_constructor, private_field};
 mod locations;
 pub(crate) use calls::{is_array_insertion, is_source_extern};
-pub(crate) use iteration::is_object_coercibility_check;
 pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset};
 mod iteration;
@@ -39,6 +40,36 @@ pub(crate) use witnesses::{
     adapter_name,
 };
 
+struct Prepare<'a> {
+    analysis: &'a mut crate::source::Analysis,
+    error: Option<Diagnostic>,
+}
+
+impl VisitMut for Prepare<'_> {
+    fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
+        if let ast::Stmt::ForOf(iteration) = statement {
+            match self.lower_for_of(iteration.take()) {
+                Ok(lowered) => *statement = lowered,
+                Err(error) => {
+                    self.error.get_or_insert(error);
+                    return;
+                }
+            }
+        }
+        statement.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
+        call.visit_mut_children_with(self);
+        methods::preserve_arguments(call, &self.analysis.classes);
+    }
+
+    fn visit_mut_class_prop(&mut self, prop: &mut ast::ClassProp) {
+        prop.visit_mut_children_with(self);
+        classes::preserve_field_type(prop);
+    }
+}
+
 pub(crate) fn lower<'s, 'r>(
     loaded: modules::Loaded<'s>,
     identity: &str,
@@ -51,7 +82,7 @@ pub(crate) fn lower<'s, 'r>(
         let top_level = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, top_level, true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
-        locations.collect(&ast, unresolved);
+        locations.collect(&ast);
         timers::check_imports(&ast, &locations)?;
         crate::source::Constructors::bind(&mut ast, unresolved, &locations)?;
         streams::preserve_options(&mut ast, unresolved, &locations)?;
@@ -61,17 +92,17 @@ pub(crate) fn lower<'s, 'r>(
         ))
     })?;
     let mut analysis = crate::source::analyze(&mut ast, &mut locations, top_level);
-    streams::lower(&mut ast, &mut analysis)?;
-    methods::preserve_arguments(&mut ast, &mut analysis);
-    classes::preserve_field_types(&mut ast);
-    let capture_spans = !witnesses.witnesses.is_empty() || !analysis.signature_prefix.is_empty();
-    if capture_spans {
-        perry_hir::ir::set_current_module_source(locations.module_text());
+    let mut prepare = Prepare {
+        analysis: &mut analysis,
+        error: None,
+    };
+    ast.visit_mut_with(&mut prepare);
+    if let Some(error) = prepare.error {
+        return Err(error);
     }
+    perry_hir::ir::set_current_module_source(locations.module_text());
     let result = perry_hir::lower_module(&ast, "main", identity);
-    if capture_spans {
-        perry_hir::ir::clear_current_module_source();
-    }
+    perry_hir::ir::clear_current_module_source();
     let mut module = result.map_err(|error| {
         let lower_error = error.downcast_ref::<perry_hir::error::LowerError>();
         let span = lower_error.and_then(|error| error.span);
@@ -177,7 +208,7 @@ function builtin() { return new Set<string>(); }
         let loaded = modules::load(source, "shadow.ts", &modules, &HashMap::new()).unwrap();
         let (lowered, _) = lower(loaded, "shadow.ts", None).unwrap();
         for function in &lowered.bodies.functions {
-            let Stmt::Return(Some(expr)) = &function.body[0] else {
+            let Stmt::Return(Some(expr), _) = &function.body[0] else {
                 panic!("expected constructor return");
             };
             if function.name == "builtin" {
@@ -205,39 +236,31 @@ function builtin() { return new Set<string>(); }
     }
 
     #[test]
-    fn generated_bindings_avoid_source_names() {
-        // Each source binds the name the first generated binding would take without a check.
-        for source in [
-            r#"function f(): string {
-                const __perry_arr_rest_1_ = "user";
-                const [first, ...others] = [1, 2].map((x) => x);
-                return __perry_arr_rest_1_;
-            }"#,
-            r#"function f(): string {
-                const __perry_loop_1_items = "user";
-                for (const x of [1, 2]) {}
-                return __perry_loop_1_items;
-            }"#,
-        ] {
-            let modules = std::collections::BTreeMap::new();
-            let loaded = modules::load(source, "names.ts", &modules, &HashMap::new()).unwrap();
-            let (lowered, _) = lower(loaded, "names.ts", None).unwrap();
-            let function = &lowered.bodies.functions[0];
-            let user = function.body.iter().find_map(|stmt| match stmt {
-                Stmt::Let {
-                    id,
-                    init: Some(Expr::String(value)),
-                    ..
-                } if value == "user" => Some(*id),
-                _ => None,
-            });
-            let returned = function.body.iter().find_map(|stmt| match stmt {
-                Stmt::Return(Some(Expr::LocalGet(id))) => Some(*id),
-                _ => None,
-            });
-            assert!(user.is_some(), "no user binding in {:?}", function.body);
-            assert_eq!(returned, user, "{source}");
-        }
+    fn typed_array_bindings_reach_perry_for_of() {
+        let source = r#"
+function walk<T>(items: T[]) {
+    const local: T[] = items, alias = local, literal = [1, 2];
+    for (const x of items) {}
+    for (const x of local) {}
+    for (const x of alias) {}
+    for (const x of literal) {}
+    { const items = "text"; for (const scalar of items) {} }
+}"#;
+        let modules = std::collections::BTreeMap::new();
+        let loaded = modules::load(source, "loops.ts", &modules, &HashMap::new()).unwrap();
+        let (lowered, _) = lower(loaded, "loops.ts", None).unwrap();
+        let adapted: Vec<_> = lowered
+            .declarations
+            .locals
+            .values()
+            .filter(|local| {
+                local
+                    .flags
+                    .contains(crate::engine::types::LocalFlags::FOR_OF)
+            })
+            .map(|local| lowered.locations.source_text(local.span).unwrap())
+            .collect();
+        assert_eq!(adapted, ["for (const scalar of items) {}"]);
     }
 }
 

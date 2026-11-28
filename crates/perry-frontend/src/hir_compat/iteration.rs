@@ -14,14 +14,15 @@ pub(crate) struct Locals<'h> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Binding<'h> {
     Guard(Option<&'h Expr>),
-    ObjectPattern(u32),
     Temporary,
+    YieldedValue,
 }
 
 pub(crate) enum RecordExpr<'a> {
     Value(&'a Expr),
     RequireObject(&'a Expr),
     Length(&'a Expr),
+    RestAppend(&'a Expr, &'a Expr),
     Close,
 }
 
@@ -38,15 +39,7 @@ pub(crate) struct Element<'a> {
     pub(crate) advance: Option<&'a Expr>,
     pub(crate) done: LocalId,
     pub(crate) condition: &'a Expr,
-    pub(crate) missing: &'a Expr,
     pub(crate) available: Availability<'a>,
-}
-
-const RUNTIME: &str = "__perry_runtime";
-const REQUIRE_OBJECT: &str = "requireObjectCoercible";
-
-pub(crate) fn is_object_coercibility_check(module: &str, method: &str) -> bool {
-    module == RUNTIME && method == REQUIRE_OBJECT
 }
 
 fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
@@ -57,18 +50,20 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
             object: None,
             method,
             args,
-        } if module == RUNTIME => Some((method, args)),
+            ..
+        } if module == "__perry_runtime" => Some((method, args)),
         _ => None,
     }
 }
 
-fn compared_to_true(expr: &Expr) -> Option<&Expr> {
+fn compared_bool(expr: &Expr) -> Option<(&Expr, bool)> {
     match expr {
         Expr::Compare {
             op: CompareOp::Eq,
             left,
             right,
-        } if matches!(&**right, Expr::Bool(true)) => Some(left),
+            ..
+        } if let Expr::Bool(value) = **right => Some((left, value)),
         _ => None,
     }
 }
@@ -107,57 +102,93 @@ impl<'h> Locals<'h> {
 
     pub(crate) fn bind(&mut self, local: LocalIdx, name: &str, init: Option<&'h Expr>) {
         let call = init.and_then(runtime);
-        let released = name.starts_with("__iterator_record_")
-            || name.starts_with("__iterator_literal_")
-            || matches!(call, Some(("arrayRecordPayload", _)))
-            || init.and_then(|e| self.dense_branch(e)).is_some();
-        let role = match call {
-            Some(("arrayRecordNeedsIterator", [])) => Binding::Guard(None),
+        self.rows[local].iteration = match call {
+            Some(("arrayRecordNeedsIterator", [])) => Some(Binding::Guard(None)),
             Some(("arrayRecordNeedsIterator", [Expr::LocalSet(local, source), ..])) if matches!(&**source, Expr::LocalGet(other) if other == local) => {
-                Binding::Guard(Some(source))
+                Some(Binding::Guard(Some(source)))
             }
-            Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) => {
-                Binding::ObjectPattern(*offset as u32)
+            _ if self.rows[local].flags.contains(LocalFlags::GENERATED)
+                && (name.starts_with("__iterator_record_")
+                    || name.starts_with("__iterator_literal_")
+                    || matches!(call, Some(("arrayRecordPayload", _)))
+                    || init.and_then(|expr| self.dense_branch(expr)).is_some()) =>
+            {
+                Some(Binding::Temporary)
             }
-            _ if released => Binding::Temporary,
-            _ => return,
-        };
-        self.rows[local].iteration = Some((role, released));
-    }
-
-    pub(crate) fn object_pattern_offset(&self, receiver: &Expr) -> Option<u32> {
-        let Expr::LocalGet(id) = receiver else {
-            return None;
-        };
-        match self.row(*id)?.iteration? {
-            (Binding::ObjectPattern(offset), _) => Some(offset),
             _ => None,
-        }
+        };
     }
 
     pub(crate) fn guard(&self, id: LocalId) -> Option<Option<&'h Expr>> {
         match self.row(id)?.iteration? {
-            (Binding::Guard(source), _) => Some(source),
+            Binding::Guard(source) => Some(source),
             _ => None,
         }
     }
 
-    pub(crate) fn is_guard(&self, expr: &Expr) -> bool {
+    fn dense_test(&self, expr: &Expr) -> Option<bool> {
         match expr {
-            Expr::LocalGet(id) => self.guard(*id).is_some(),
-            _ => compared_to_true(expr).is_some_and(|left| self.is_guard(left)),
+            Expr::ArrayIterationPatched => Some(false),
+            Expr::LocalGet(id) => self.guard(*id).map(|_| false),
+            Expr::Unary {
+                op: perry_hir::UnaryOp::Not,
+                operand,
+            } => Some(!self.dense_test(operand)?),
+            _ if let Some((left, value)) = compared_bool(expr) => {
+                Some(self.dense_test(left)? == value)
+            }
+            _ if matches!(
+                runtime(expr),
+                Some(("arrayRecordNeedsIterator", [Expr::LocalGet(_), ..]))
+            ) =>
+            {
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn dense_statements<'a>(&self, stmt: &'a Stmt) -> Option<&'a [Stmt]> {
+        match stmt {
+            // The builtin array iterator has no observable close operation.
+            Stmt::Try {
+                forof_completion: Some(_),
+                body,
+                ..
+            } => Some(body),
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => Some(if self.dense_test(condition)? {
+                then_branch
+            } else {
+                else_branch.as_deref().unwrap_or_default()
+            }),
+            _ => None,
         }
     }
 
     fn dense_branch<'a>(&self, expr: &'a Expr) -> Option<&'a Expr> {
-        match expr {
-            Expr::Conditional {
-                condition,
-                else_expr,
-                ..
-            } if self.is_guard(condition) => Some(else_expr),
-            _ => None,
+        let Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        if let Some(test) = self.dense_test(condition) {
+            return Some(if test { then_expr } else { else_expr });
         }
+        let Expr::LocalGet(id) = &**else_expr else {
+            return None;
+        };
+        let available = self.bound_element(*id)?.available;
+        (matches!(available, Availability::Known(false))
+            && crate::narrowing::DefinedGuard::of(condition)?.proves(false, else_expr))
+        .then_some(then_expr)
     }
 
     pub(crate) fn expression<'a>(&self, expr: &'a Expr) -> Option<RecordExpr<'a>> {
@@ -165,9 +196,16 @@ impl<'h> Locals<'h> {
             return Some(RecordExpr::Value(value));
         }
         Some(match runtime(expr)? {
+            ("arrayRecordForBound" | "arrayRecordForUpdate", [guard, value, ..])
+            | ("arrayRecordForValue", [guard, _, value])
+                if self.dense_test(guard) == Some(false) =>
+            {
+                RecordExpr::Value(value)
+            }
             ("arrayRecordIndex", [value]) => RecordExpr::Value(value),
-            (REQUIRE_OBJECT, [value, ..]) => RecordExpr::RequireObject(value),
+            ("requireObjectCoercible", [value, ..]) => RecordExpr::RequireObject(value),
             ("arrayRecordLength", [source]) => RecordExpr::Length(source),
+            ("iteratorRestAppend", [array, value]) => RecordExpr::RestAppend(array, value),
             ("arrayRecordPayload", [_, Expr::LocalSet(_, value), _]) => RecordExpr::Value(value),
             ("arrayRecordClose", _) => RecordExpr::Close,
             _ => return None,
@@ -175,7 +213,28 @@ impl<'h> Locals<'h> {
     }
 
     pub(crate) fn is_release(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::LocalSet(id, value) if self.row(*id).and_then(|r| r.iteration).is_some_and(|(_, released)| released) && matches!(&**value, Expr::Undefined))
+        matches!(expr, Expr::LocalSet(id, value) if self.row(*id).and_then(|r| r.iteration).is_some() && matches!(&**value, Expr::Undefined))
+    }
+
+    pub(crate) fn initializer<'a>(&self, id: LocalId, init: Option<&'a Expr>) -> Option<&'a Expr> {
+        match (self.row(id).and_then(|row| row.iteration), init) {
+            (Some(Binding::YieldedValue), Some(Expr::Undefined)) => None,
+            (_, init) => init,
+        }
+    }
+
+    pub(crate) fn index_iterator_value(&mut self, expr: &Expr) {
+        let id = match runtime(expr) {
+            Some(("iteratorRestAppend", [_, Expr::LocalGet(id)]))
+            | Some(("arrayRecordForValue", [_, Expr::LocalGet(id), _])) => *id,
+            _ => return,
+        };
+        if let Some(local) = self.index(id)
+            && self.rows[local].flags.contains(LocalFlags::GENERATED)
+        {
+            // Initialization and release write undefined outside the yielded value's lifetime.
+            self.rows[local].iteration = Some(Binding::YieldedValue);
+        }
     }
 
     pub(crate) fn index_elements(
@@ -212,8 +271,12 @@ impl<'h> Locals<'h> {
         let [Stmt::Let { id, .. }, Stmt::If { condition, .. }, rest @ ..] = statements else {
             return None;
         };
-        let element = self.elements.get(self.row(*id)?.element?)?;
+        let element = self.bound_element(*id)?;
         std::ptr::eq(condition, element.condition).then_some((*element, rest))
+    }
+
+    fn bound_element(&self, id: LocalId) -> Option<&Element<'h>> {
+        self.elements.get(self.row(id)?.element?)
     }
 
     fn recognize_element(&self, stmt: &'h Stmt) -> Option<(Element<'h>, bool)> {
@@ -225,7 +288,7 @@ impl<'h> Locals<'h> {
         else {
             return None;
         };
-        let Expr::LocalGet(done) = compared_to_true(condition)? else {
+        let (Expr::LocalGet(done), true) = compared_bool(condition)? else {
             return None;
         };
         let [Stmt::Expr(Expr::LocalSet(id, missing))] = then_branch.as_slice() else {
@@ -271,7 +334,6 @@ impl<'h> Locals<'h> {
                 advance,
                 done: *done,
                 condition,
-                missing,
                 available,
             },
             binds,

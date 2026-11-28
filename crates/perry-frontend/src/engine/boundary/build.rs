@@ -24,7 +24,6 @@ impl<'h> ModuleIndex<'h> {
         debug_assert_eq!(init_tid, TemplateId::INIT);
         let mut scan = ScanCtx {
             decls,
-            locations,
             strings: Default::default(),
             static_uses: Vec::new(),
             literals: bodies

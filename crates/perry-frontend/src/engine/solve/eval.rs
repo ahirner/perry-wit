@@ -421,44 +421,33 @@ impl<'h, 'a> Solver<'h, 'a> {
         let depth = s.guards.depth();
         let mut remaining = stmts;
         while let Some((stmt, rest)) = remaining.split_first() {
-            let inferred = match stmt {
-                Stmt::Let {
-                    id,
-                    init: Some(init),
-                    ..
-                } if let Some(hir_compat::RecordExpr::Value(value)) =
-                    self.index.locals.expression(init) =>
-                {
-                    Some((*id, self.eval_expr(s, value)?))
-                }
-                _ if let Some((element, _)) = self.index.locals.element(remaining) => {
-                    let ty = self.eval_expr(s, element.value)?;
-                    let ty = match element.available {
-                        hir_compat::Availability::Known(true) => ty,
-                        hir_compat::Availability::Known(false) => Ty::VOID,
-                        hir_compat::Availability::Test(_) => {
-                            self.types.with_absences(ty, Absence::Undefined)
-                        }
-                    };
-                    Some((element.id, ty))
-                }
-                _ => None,
-            };
-            if let Some((id, ty)) = inferred {
-                if let Some(local) = self.index.local_idx(id) {
+            if let Some((element, tail)) = self.index.locals.element(remaining) {
+                let value = self.eval_expr(s, element.value)?;
+                let ty = match element.available {
+                    hir_compat::Availability::Known(true) => value,
+                    hir_compat::Availability::Known(false) => Ty::VOID,
+                    hir_compat::Availability::Test(_) => {
+                        self.types.with_absences(value, Absence::Undefined)
+                    }
+                };
+                if let Some(local) = self.index.local_idx(element.id) {
                     self.write_local_value(s, local, ty)?;
                     self.mark_written(s.inst, local);
                 }
+                remaining = tail;
             } else {
                 self.eval_stmt(s, stmt)?;
+                remaining = rest;
             }
-            remaining = rest;
         }
         s.guards.truncate(depth);
         Ok(())
     }
 
     pub(super) fn eval_stmt(&mut self, s: &mut EvalState<'h>, stmt: &'h Stmt) -> Result<()> {
+        if let Some(body) = self.index.locals.dense_statements(stmt) {
+            return self.eval_stmts(s, body);
+        }
         match stmt {
             Stmt::Let { id, init, .. } => {
                 let Some(lidx) = self.index.local_idx(*id) else {
@@ -468,6 +457,20 @@ impl<'h, 'a> Solver<'h, 'a> {
                     return Ok(());
                 };
                 let local = self.index.locals.rows[lidx];
+                let init = self.index.locals.initializer(*id, init.as_ref());
+                if local.flags.contains(LocalFlags::FOR_OF)
+                    && let Some(source) = init
+                {
+                    let value = self.eval_expr(s, source)?;
+                    let ty = self.resolve_cell_read(s.inst, value);
+                    let item = if ty == Ty::BOTTOM {
+                        ty
+                    } else {
+                        builtins::iterated_element(self.ctx, self.types, ty).unwrap_or(Ty::OPEN)
+                    };
+                    self.mark_written(s.inst, lidx);
+                    return self.write_local_value(s, lidx, item);
+                }
                 let is_inferred = !local.flags.is_explicit();
                 let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
                 let declared = local.declared;
@@ -565,7 +568,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Stmt::Expr(e) | Stmt::Throw(e) => {
                 self.eval_expr(s, e)?;
             }
-            Stmt::Return(value) => {
+            Stmt::Return(value, _) => {
                 s.has_return_value = true;
                 let mut ty = match value {
                     Some(e) => self.eval_expr(s, e)?,
@@ -659,22 +662,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 update,
                 body,
             } => {
-                if let Some((id, source)) = self.index.locals.for_of(init.as_deref()) {
-                    let iterable = self.eval_expr(s, source)?;
-                    let iterable = self.resolve_cell_read(s.inst, iterable);
-                    let element = if iterable == Ty::BOTTOM {
-                        Ty::BOTTOM
-                    } else {
-                        builtins::iterated_element(self.ctx, self.types, iterable)
-                            .unwrap_or(Ty::OPEN)
-                    };
-                    let local = self
-                        .index
-                        .local_idx(id)
-                        .ok_or_else(|| Diagnostic::internal("missing iteration binding"))?;
-                    self.write_local_value(s, local, element)?;
-                    self.mark_written(s.inst, local);
-                } else if let Some(init) = init {
+                if let Some(init) = init {
                     self.eval_stmt(s, init)?;
                 }
                 self.invalidate_writes(
@@ -716,6 +704,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Stmt::Switch {
                 discriminant,
                 cases,
+                ..
             } => {
                 self.eval_expr(s, discriminant)?;
                 for case in cases {

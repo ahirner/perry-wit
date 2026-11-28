@@ -62,6 +62,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                 }
                 hir_compat::RecordExpr::Close => self.absent_literal(ctx, false, expected),
+                hir_compat::RecordExpr::RestAppend(array, item) => {
+                    let array = self.expression(ctx, array)?;
+                    self.push_values(ctx, array, std::slice::from_ref(item))?;
+                    Ok(array)
+                }
             }
             .map(Some);
         }
@@ -142,11 +147,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let Some((last, effects)) = parts.split_last() else {
                     return Ok(None);
                 };
-                if let Some(span) = self.shapes.locations.operator_span(parts) {
-                    return self
-                        .instance_operand(ctx, last, expected, required)
-                        .map_err(|error| error.with_fallback_span(Some(span)));
-                }
                 for part in effects {
                     self.effect(ctx, part)?;
                 }
@@ -214,13 +214,20 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.update(ctx, *id, &op, *prefix)
                     .map_err(|error| self.shapes.annotate_local(error, *id))?
             }
-            Expr::Binary { op, left, right } => self.binary_expression(ctx, op, left, right)?,
-            Expr::Compare { op, left, right } => self.comparison(ctx, op, left, right)?,
-            Expr::Logical { op, left, right } => self.logical(ctx, op, left, right, expected)?,
+            Expr::Binary {
+                op, left, right, ..
+            } => self.binary_expression(ctx, op, left, right)?,
+            Expr::Compare {
+                op, left, right, ..
+            } => self.comparison(ctx, op, left, right)?,
+            Expr::Logical {
+                op, left, right, ..
+            } => self.logical(ctx, op, left, right, expected)?,
             Expr::Conditional {
                 condition,
                 then_expr,
                 else_expr,
+                ..
             } => self.conditional(ctx, condition, then_expr, else_expr, expected)?,
             Expr::Unary { op, operand } => self.unary(ctx, op, operand)?,
 
@@ -362,7 +369,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::InstanceOf {
                 expr: value, ty, ..
             } => self.instance_of(ctx, value, ty)?,
-            Expr::Await(promise) => self.await_(ctx, promise)?,
+            Expr::Await(promise, _) => self.await_(ctx, promise)?,
             Expr::New {
                 class_name,
                 args,
@@ -409,6 +416,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 class_name,
                 field_name,
                 value,
+                ..
             } => self.local_set(
                 ctx,
                 self.shapes.static_field(expr, class_name, field_name)?,

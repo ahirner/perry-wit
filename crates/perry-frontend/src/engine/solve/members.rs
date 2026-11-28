@@ -17,7 +17,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn assign_property(
         &mut self,
         s: &EvalState<'h>,
@@ -26,9 +25,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         property: &str,
         value: &'h Expr,
         val_ty: Ty,
-        byte_offset: u32,
     ) -> Result<()> {
-        self.check_escaping_func(s.inst, val_ty, byte_offset, s.current_span)?;
+        self.check_escaping_func(s.inst, val_ty, 0, s.current_span)?;
         let field_ty = match self.types.kind(obj_def) {
             TyKind::Object { .. } => {
                 let declared =
@@ -39,13 +37,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                     && val_ty != Ty::BOTTOM
                     && !declared.is_some_and(|p| self.types.accepts(p, val_ty))
                 {
-                    let mut err = Diagnostic::unsupported(format!(
+                    let err = Diagnostic::unsupported(format!(
                         "reassigning function property '{property}' on an object literal is not supported yet"
                     ));
-                    if hir_compat::has_source_offset(byte_offset) {
-                        err = err.with_fallback_span(self.hir.locations.member_span(byte_offset));
-                    }
-                    return Err(self.annotate_expr_error(s, err, byte_offset));
+                    return Err(self.annotate_expr_error(s, err, 0));
                 }
                 declared.unwrap_or(val_ty)
             }
@@ -357,10 +352,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         site: &'h Expr,
         obj_ty: Ty,
         index: &'h Expr,
-        element_offset: u32,
+        byte_offset: u32,
     ) -> Result<Ty> {
         let (obj_def, _) = self.types.strip_nullish(obj_ty);
-        self.check_timer_member(obj_def, element_offset)?;
+        self.check_timer_member(obj_def, byte_offset)?;
         let idx_ty = self.eval_expr(s, index)?;
         if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
             if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
@@ -376,7 +371,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if let Expr::String(name) = index {
             let stripped = self.types.strip_nullish(obj_ty).0;
-            let class = self.resolve_class_inst(s.inst, stripped, element_offset)?;
+            let class = self.resolve_class_inst(s.inst, stripped, byte_offset)?;
             if let Some(ty) = self.member_type(s.inst, site, stripped, name, class)? {
                 return Ok(ty);
             }
@@ -410,11 +405,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Err(Diagnostic::unsupported(format!(
                 "property {property} is not supported on Error yet"
             ))
-            .with_fallback_span(self.hir.locations.member_span(byte_offset).or_else(|| {
-                self.hir
-                    .locations
-                    .offset_span(self.index.locals.object_pattern_offset(object)?, 1)
-            })));
+            .with_fallback_span(self.hir.locations.member_span(byte_offset)));
         }
         if let TyKind::Cell {
             loc,
@@ -432,7 +423,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .member_type(s.inst, site, stripped, property, class)?
             .unwrap_or_else(|| {
                 if self.types.closed_record(stripped).is_some()
-                    && self.index.locals.object_pattern_offset(object).is_some()
+                    && self.hir.locations.is_pattern_key(byte_offset)
                 {
                     Ty::VOID
                 } else {

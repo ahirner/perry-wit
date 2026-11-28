@@ -91,6 +91,16 @@ fn resource_members_follow_the_receiver_in_retained_and_specialized_bodies() -> 
         new Text()[Symbol.dispose](); return next().read().length + Count.open().read(); }}"
     );
     MemoryChecked.compile(wit, "source", "retained.ts", &retained)?;
+    let shadowed = retained.replace("retained()", "retained(Symbol: {dispose: string})");
+    let error = MemoryChecked
+        .compile(wit, "source", "retained.ts", &shadowed)
+        .expect_err("a shadowed Symbol.dispose is an ordinary computed key");
+    assert!(
+        error
+            .to_string()
+            .contains("computed method or element calls"),
+        "{error}"
+    );
     let wrong_arity = retained.replace("next().read()", "next().read(1)");
     let error = MemoryChecked
         .compile(wit, "source", "retained.ts", &wrong_arity)
@@ -130,16 +140,16 @@ fn imported_error_cases_throw_and_release_owned_payloads() -> Result<()> {
 export function run(closed) {try {if(closed) Reader.read({tag:'ok'}); else Reader.read({tag:'err',val:'failed'}); return 'ok';}
 catch(e) {return e.message;}}";
     let compile = |source: &str| MemoryChecked.component(wit, "app", "read.js", source);
-    for (read, column) in [
-        ("return e.payload.val;", 18),
-        ("const {payload: p = 'none'} = e; return String(p);", 17),
+    for read in [
+        "return e.payload.val;",
+        "const {payload: p = 'none'} = e; return String(p);",
     ] {
         let diagnostic = compile(&source.replace("return e.message;", read))
             .err()
             .ok_or_else(|| anyhow::anyhow!("payload read compiled"))?
             .to_string();
         assert!(
-            diagnostic.contains(&format!("read.js:3:{column}: error[unsupported-construct]"))
+            diagnostic.contains("read.js:3:18: error[unsupported-construct]")
                 && diagnostic.contains("payload"),
             "{diagnostic}"
         );

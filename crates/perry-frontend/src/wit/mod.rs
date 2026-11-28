@@ -266,9 +266,8 @@ impl<'h> BoundMember<'h> {
         ctx: &pliron::context::Context,
         expr: &'h Expr,
         decls: &crate::shapes::Declarations,
-        locations: &crate::hir_compat::Locations,
     ) -> Option<Self> {
-        use crate::hir_compat::{class_receiver, member, method};
+        use crate::hir_compat::{MemberKey, class_receiver, member, method};
         let world = decls.world;
         if world.imports.is_empty() {
             return None;
@@ -280,29 +279,26 @@ impl<'h> BoundMember<'h> {
                 method_name,
                 ..
             } => (class_name.as_str(), world.statics.get(method_name)?),
-            Expr::Call {
-                callee,
-                byte_offset,
-                byte_end,
-                ..
-            } => {
+            Expr::Call { callee, .. } => {
                 let (object, property) = member(callee)?;
-                match property.name().map(|n| method(n).name()) {
-                    Some(name) if let Some(class) = class_receiver(object) => {
-                        (class, world.statics.get(name)?)
+                match property {
+                    MemberKey::Named(name, _) => {
+                        let name = method(name).name();
+                        if let Some(class) = class_receiver(object) {
+                            (class, world.statics.get(name)?)
+                        } else {
+                            return Some(Self::Receiver(
+                                object,
+                                MemberGroupId::Method(world.methods.get_index_of(name)?),
+                            ));
+                        }
                     }
-                    Some(name) => {
-                        return Some(Self::Receiver(
-                            object,
-                            MemberGroupId::Method(world.methods.get_index_of(name)?),
-                        ));
-                    }
-                    None if !world.drops.is_empty()
-                        && locations.calls_dispose(*byte_offset, *byte_end) =>
+                    MemberKey::Computed(Expr::WellKnownSymbol("dispose"), _)
+                        if !world.drops.is_empty() =>
                     {
                         return Some(Self::Receiver(object, MemberGroupId::Drop));
                     }
-                    None => return None,
+                    MemberKey::Computed(..) => return None,
                 }
             }
             _ => return None,

@@ -402,13 +402,13 @@
   },
   {
     "workload": "example: merge_task",
-    "bytes": 21227,
-    "core_bytes": 20835,
+    "bytes": 21202,
+    "core_bytes": 20810,
     "defined_functions": 56,
     "helper_functions": 50,
     "optimization": {
-      "cleanup_rounds": 5,
-      "constraint_visits": 269,
+      "cleanup_rounds": 6,
+      "constraint_visits": 268,
       "numeric_contexts": 3,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
