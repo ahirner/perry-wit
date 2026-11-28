@@ -9,52 +9,19 @@ use pliron::{
     basic_block::BasicBlock,
     builtin::{
         attributes::{FPDoubleAttr, IntegerAttr},
-        op_interfaces::{BranchOpInterface, OneRegionInterface, OneResultInterface},
+        op_interfaces::{BranchOpInterface, OneResultInterface},
         ops::ConstantOp,
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
     derive::op_interface_impl,
     irbuild::{IRStatus, rewriter::Rewriter},
-    linked_list::ContainsLinkedList,
-    op::{Op, op_cast},
-    operation::Operation,
+    op::Op,
     opts::constants::{BranchOpFoldInterface, ConstFoldInterface},
     r#type::Typed,
     utils::apint::{APInt, bw},
 };
 use std::cmp::Ordering::{Equal, Greater, Less};
-
-/// Remove unused basic-block arguments while preserving entry-block function parameters.
-pub(crate) fn remove_unused_block_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
-    let mut status = IRStatus::Unchanged;
-    for function in crate::aggregates::functions(root, ctx) {
-        let blocks: Vec<_> = function
-            .get_region(ctx)
-            .deref(ctx)
-            .iter(ctx)
-            .skip(1)
-            .collect();
-        for block in blocks {
-            let arguments: Vec<_> = block.deref(ctx).arguments().collect();
-            for (index, argument) in arguments.into_iter().enumerate().rev() {
-                if argument.is_used(ctx) {
-                    continue;
-                }
-                for predecessor in block.uses(ctx) {
-                    let successor = predecessor.find_index(ctx);
-                    let branch = Operation::get_op_dyn(predecessor.user_op(), ctx);
-                    op_cast::<dyn BranchOpInterface>(&*branch)
-                        .expect("MIR branch")
-                        .remove_successor_operand(ctx, successor, index);
-                }
-                BasicBlock::remove_argument(block, ctx, index);
-                status = IRStatus::Changed;
-            }
-        }
-    }
-    status
-}
 
 #[op_interface_impl]
 impl ConstFoldInterface for BinaryOp {
