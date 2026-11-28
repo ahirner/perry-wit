@@ -5,7 +5,6 @@ use perry_hir::{
     types::{FuncId, LocalId},
 };
 use perry_wit_diagnostics::Result;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Arguments<'s> {
@@ -126,9 +125,33 @@ pub(crate) struct ModuleDeclarations {
     pub(crate) imports: Vec<Import>,
     pub(crate) interfaces: Vec<Interface>,
     pub(crate) type_aliases: Vec<TypeAlias>,
-    pub(crate) locals: HashMap<LocalId, LocalDeclaration>,
-    pub(crate) closure_names: HashMap<FuncId, String>,
+    /// Indexed by `LocalId`. Perry records source spans for authored declarations only.
+    pub(crate) locals: Vec<Option<LocalDeclaration>>,
+    /// Indexed by `FuncId`. Anonymous closures have no display name.
+    closure_names: Vec<Option<String>>,
     pub(crate) has_top_level_await: bool,
+}
+
+impl ModuleDeclarations {
+    pub(crate) fn local(&self, id: LocalId) -> Option<&LocalDeclaration> {
+        self.locals.get(id as usize)?.as_ref()
+    }
+
+    pub(crate) fn closure_name(&self, id: FuncId) -> Option<&str> {
+        self.closure_names.get(id as usize)?.as_deref()
+    }
+}
+
+/// Column of `T` indexed by a dense Perry HIR id.
+fn dense<T>(entries: impl IntoIterator<Item = (u32, T)>) -> Vec<Option<T>> {
+    let mut entries: Vec<_> = entries.into_iter().collect();
+    entries.sort_unstable_by_key(|&(id, _)| id);
+    let mut column = Vec::new();
+    for (id, value) in entries {
+        column.resize_with(id as usize, || None);
+        column.push(Some(value));
+    }
+    column
 }
 
 pub(crate) struct LocalDeclaration {
@@ -152,26 +175,18 @@ impl<'s> SourceModule<'s> {
         locations: crate::hir_compat::Locations<'s>,
         resources: crate::hir_compat::ResourceClasses<super::ClassId>,
     ) -> Self {
-        let locals = module
-            .local_source_spans
-            .into_iter()
-            .map(|(id, span)| {
-                let syntax = analysis
-                    .bindings
-                    .get(&span.start)
-                    .copied()
-                    .unwrap_or_default();
-                let span = swc_common::Span::new(
-                    swc_common::BytePos(span.start),
-                    swc_common::BytePos(span.end),
-                );
-                let mut flags = syntax.flags;
-                if syntax.inferred_end == Some(span.hi.0) {
-                    flags.insert(LocalFlags::INFERRED);
-                }
-                (id, LocalDeclaration { span, flags })
-            })
-            .collect();
+        let locals = dense(module.local_source_spans.into_iter().map(|(id, span)| {
+            let span = swc_common::Span::new(
+                swc_common::BytePos(span.start),
+                swc_common::BytePos(span.end),
+            );
+            let binding = analysis.bindings.get(&span.lo.0);
+            let mut flags = binding.map_or(LocalFlags::default(), |binding| binding.flags);
+            if binding.is_some_and(|binding| binding.inferred_end == Some(span.hi.0)) {
+                flags.insert(LocalFlags::INFERRED);
+            }
+            (id, LocalDeclaration { span, flags })
+        }));
         Self {
             locations,
             resources,
@@ -183,7 +198,7 @@ impl<'s> SourceModule<'s> {
                 interfaces: module.interfaces,
                 type_aliases: module.type_aliases,
                 locals,
-                closure_names: module.closure_display_names,
+                closure_names: dense(module.closure_display_names),
                 has_top_level_await: module.has_top_level_await,
             },
             bodies: Bodies {

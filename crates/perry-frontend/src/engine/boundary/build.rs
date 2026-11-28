@@ -10,12 +10,12 @@ impl<'h> ModuleIndex<'h> {
         decls: &crate::shapes::Declarations<'h>,
         types: &mut TypeTable,
     ) -> Self {
-        let max_local_hint = declarations.locals.keys().copied().max().unwrap_or(0);
+        let local_ids = declarations.locals.len().max(1);
         let mut idx = Self {
             functions: Vec::with_capacity(bodies.functions.len() + 1),
             ..Self::default()
         };
-        idx.locals.ids.resize(max_local_hint as usize + 1, None);
+        idx.locals.ids.resize(local_ids, None);
         let init_tid = idx.add_template(TemplateView {
             body: &bodies.init,
             is_async: declarations.has_top_level_await,
@@ -253,7 +253,7 @@ impl<'h> ModuleIndex<'h> {
             }
         }
         for local in idx.locals.rows.as_mut_slice() {
-            local.span = declarations.locals.get(&local.id).map(|d| d.span);
+            local.span = declarations.local(local.id).map(|d| d.span);
         }
         idx
     }

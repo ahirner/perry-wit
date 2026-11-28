@@ -729,9 +729,8 @@ impl<'h> ModuleIndex<'h> {
                     kind: TemplateKind::Closure(site),
                     name: scan
                         .declarations
-                        .closure_names
-                        .get(func_id)
-                        .map_or("", String::as_str)
+                        .closure_name(*func_id)
+                        .unwrap_or("")
                         .into(),
                     func_id: *func_id,
                     params: params.as_slice(),

@@ -242,8 +242,7 @@ pub(crate) fn build_module<'r>(
                 .native_param(crate::engine::NativeParam::Value(ty))
                 .map_err(|error| {
                     let source = declarations
-                        .locals
-                        .get(&param.id)
+                        .local(param.id)
                         .and_then(|span| locations.source_at(span.span.lo.0));
                     let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
                         format!("{}", idx + 1)
