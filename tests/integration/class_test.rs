@@ -52,6 +52,21 @@ class Fields {
     constructor() { this.later = 17; }
     keys() { return Object.keys(this).join(","); }
 }
+class PartialCounter {
+    value:number;
+    before:number;
+    constructor(initialize:boolean) {
+        this.before = this.next();
+        if (initialize) this.value = 0;
+    }
+    next():number { return this.value + 1; }
+}
+export function partialCounter(flag:number) {
+    const counter = new PartialCounter(flag > 0);
+    if (!Number.isNaN(counter.before)) return -1;
+    const next = counter.next();
+    return Number.isNaN(next) ? 0 : next;
+}
 export function constructorOrder() {
     const fields = new Fields();
     if (fields.first !== "" || fields.second !== "first" || fields.keys() !== "first,second,later") return 13;
@@ -192,6 +207,8 @@ export function finiteNesting() {
 "#,
         &[
             ("constructorOrder", &[], 0.0),
+            ("partialCounter", &[0.0], 0.0),
+            ("partialCounter", &[1.0], 1.0),
             ("implicitConstructor", &[], 0.0),
             ("genericConstruction", &[], 0.0),
             ("loopHoisting", &[], 0.0),

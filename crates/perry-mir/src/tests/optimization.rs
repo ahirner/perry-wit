@@ -214,9 +214,15 @@ fn canonicalization_replaces_optional_users() -> Result<()> {
         r#"
 builtin.module @optional {
   ^module():
-    builtin.func @run: builtin.function <(builtin.fp64) -> (builtin.fp64)> {
-      ^entry(v: builtin.fp64):
-        wrapped = perry.wrap v : perry.optional <builtin.fp64,Undefined>;
+    builtin.func @run: builtin.function <(builtin.integer i1, builtin.fp64, builtin.fp64) -> (builtin.fp64)> {
+      ^entry(flag: builtin.integer i1, x: builtin.fp64, y: builtin.fp64):
+        left = perry.wrap x : perry.optional <builtin.fp64,Undefined>;
+        right = perry.wrap y : perry.optional <builtin.fp64,Undefined>;
+        done = builtin.constant <builtin.integer <0: i1>> : builtin.integer i1;
+        perry.cond_br if flag ^join(flag, left) else ^join(flag, right)
+      ^join(repeat: builtin.integer i1, wrapped: perry.optional <builtin.fp64,Undefined>):
+        perry.cond_br if repeat ^join(done, wrapped) else ^exit()
+      ^exit():
         numeric = perry.to_number wrapped : builtin.fp64;
         unwrapped = perry.unwrap wrapped : builtin.fp64;
         sum = perry.binary Add numeric, unwrapped : builtin.fp64;
@@ -231,7 +237,7 @@ builtin.module @optional {
         assert!(!printed.contains(removed), "{removed} survived:\n{printed}");
     }
     assert!(
-        normalized(&printed).contains("perry.binary Add v, v"),
+        normalized(&printed).contains("perry.binary Add wrapped, wrapped"),
         "{printed}"
     );
     Ok(())

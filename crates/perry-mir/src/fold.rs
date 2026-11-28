@@ -6,15 +6,20 @@ use crate::{
     scalar::{CompareOp, NumericCastOp},
 };
 use pliron::{
-    builtin::types::IntegerType,
+    basic_block::BasicBlock,
+    builtin::{
+        op_interfaces::{BranchOpInterface, OneRegionInterface},
+        types::IntegerType,
+    },
     context::{Context, Ptr},
     irbuild::{
+        IRStatus,
         inserter::Inserter,
         match_rewrite::{MatchRewrite, MatchRewriter},
         rewriter::Rewriter,
     },
-    linked_list::LinkedList,
-    op::Op,
+    linked_list::{ContainsLinkedList, LinkedList},
+    op::{Op, op_cast},
     operation::Operation,
     result::Result,
     r#type::Typed,
@@ -25,6 +30,84 @@ fn wrapped(ctx: &Context, value: Value) -> Option<Value> {
     let op = value.defining_op()?;
     Operation::get_op::<WrapOp>(op, ctx)?;
     Some(op.deref(ctx).get_operand(0))
+}
+
+/// Simplify arguments at control-flow joins, preserving entry-block function parameters.
+pub(crate) fn simplify_block_arguments(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus {
+    let mut status = IRStatus::Unchanged;
+    for function in crate::aggregates::functions(root, ctx) {
+        let blocks: Vec<_> = function
+            .get_region(ctx)
+            .deref(ctx)
+            .iter(ctx)
+            .skip(1)
+            .collect();
+        for block in blocks {
+            let arguments: Vec<_> = block.deref(ctx).arguments().collect();
+            for (index, argument) in arguments.into_iter().enumerate().rev() {
+                if argument.is_used(ctx) {
+                    status |= narrow_wrapped_argument(ctx, block, index, argument);
+                    continue;
+                }
+                for predecessor in block.uses(ctx) {
+                    let successor = predecessor.find_index(ctx);
+                    let branch = Operation::get_op_dyn(predecessor.user_op(), ctx);
+                    op_cast::<dyn BranchOpInterface>(&*branch)
+                        .expect("MIR branch")
+                        .remove_successor_operand(ctx, successor, index);
+                }
+                BasicBlock::remove_argument(block, ctx, index);
+                status = IRStatus::Changed;
+            }
+        }
+    }
+    status
+}
+
+/// Carry the payload through a join when every incoming edge wraps a present value
+/// or forwards the same argument unchanged on a backedge.
+fn narrow_wrapped_argument(
+    ctx: &mut Context,
+    block: Ptr<BasicBlock>,
+    index: usize,
+    argument: Value,
+) -> IRStatus {
+    let optional = argument.get_type(ctx);
+    let Some(payload) = crate::optional_value(ctx, optional) else {
+        return IRStatus::Unchanged;
+    };
+    let mut incoming = Vec::new();
+    for edge in block.uses(ctx) {
+        let terminator = edge.user_op();
+        let dynamic = Operation::get_op_dyn(terminator, ctx);
+        let branch = op_cast::<dyn BranchOpInterface>(&*dynamic).expect("MIR branch");
+        let position = branch
+            .successor_operand_range(ctx, edge.find_index(ctx))
+            .start
+            + index;
+        let value = terminator.deref(ctx).get_operand(position);
+        let inner = if value == argument {
+            argument
+        } else if let Some(inner) = wrapped(ctx, value) {
+            inner
+        } else {
+            return IRStatus::Unchanged;
+        };
+        incoming.push((terminator, position, inner));
+    }
+    if !incoming.iter().any(|&(_, _, value)| value != argument) {
+        return IRStatus::Unchanged;
+    }
+
+    argument.set_type(ctx, payload);
+    let wrap = WrapOp::with_type(ctx, argument, optional).get_operation();
+    wrap.insert_at_front(block, ctx);
+    let replacement = wrap.deref(ctx).get_result(0);
+    argument.replace_some_uses_with(ctx, |_, usage| usage.user_op() != wrap, &replacement);
+    for (terminator, position, value) in incoming {
+        Operation::replace_operand(terminator, ctx, position, value);
+    }
+    IRStatus::Changed
 }
 
 fn converted_integer(ctx: &Context, value: Value) -> Option<Value> {

@@ -33,6 +33,7 @@ struct IrPotential {
     blocks: usize,
     cond_brs: usize,
     block_args: usize,
+    optional_block_args: usize,
     non_const_ops: usize,
     cast_depth: usize,
     total_ops: usize,
@@ -56,6 +57,7 @@ impl IrPotential {
             builtin::{op_interfaces::OneRegionInterface, ops::ConstantOp},
             linked_list::ContainsLinkedList,
             op::Op,
+            r#type::Typed,
         };
         if !cfg!(any(test, debug_assertions)) {
             return Self::default();
@@ -65,6 +67,11 @@ impl IrPotential {
             for b in f.get_region(ctx).deref(ctx).iter(ctx) {
                 p.blocks += 1;
                 p.block_args += b.deref(ctx).arguments().count();
+                p.optional_block_args += b
+                    .deref(ctx)
+                    .arguments()
+                    .filter(|arg| crate::optional_value(ctx, arg.get_type(ctx)).is_some())
+                    .count();
             }
             for op in crate::aggregates::operations(ctx, &f) {
                 p.total_ops += 1;
@@ -149,9 +156,9 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
         crate::fold::Canonicalize,
     ));
     cleanup.add_pass(SCCPPass);
-    cleanup.add_pass(FnPass("unused-block-arguments", |root, ctx, _| {
+    cleanup.add_pass(FnPass("simplify-block-arguments", |root, ctx, _| {
         let mut result = PassResult::default();
-        result.ir_changed = crate::constants::remove_unused_block_arguments(root, ctx);
+        result.ir_changed = crate::fold::simplify_block_arguments(root, ctx);
         Ok(result)
     }));
     cleanup.add_pass(PassWrapper::new(
