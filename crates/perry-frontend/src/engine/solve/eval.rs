@@ -458,6 +458,19 @@ impl<'h, 'a> Solver<'h, 'a> {
                 };
                 let local = self.index.locals.rows[lidx];
                 let init = self.index.locals.initializer(*id, init.as_ref());
+                if local.flags.contains(LocalFlags::FOR_OF)
+                    && let Some(source) = init
+                {
+                    let value = self.eval_expr(s, source)?;
+                    let ty = self.resolve_cell_read(s.inst, value);
+                    let item = if ty == Ty::BOTTOM {
+                        ty
+                    } else {
+                        builtins::iterated_element(self.ctx, self.types, ty).unwrap_or(Ty::OPEN)
+                    };
+                    self.mark_written(s.inst, lidx);
+                    return self.write_local_value(s, lidx, item);
+                }
                 let is_inferred = !local.flags.is_explicit();
                 let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
                 let declared = local.declared;
@@ -649,22 +662,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 update,
                 body,
             } => {
-                if let Some((id, source)) = self.index.locals.for_of(init.as_deref()) {
-                    let iterable = self.eval_expr(s, source)?;
-                    let iterable = self.resolve_cell_read(s.inst, iterable);
-                    let element = if iterable == Ty::BOTTOM {
-                        Ty::BOTTOM
-                    } else {
-                        builtins::iterated_element(self.ctx, self.types, iterable)
-                            .unwrap_or(Ty::OPEN)
-                    };
-                    let local = self
-                        .index
-                        .local_idx(id)
-                        .ok_or_else(|| Diagnostic::internal("missing iteration binding"))?;
-                    self.write_local_value(s, local, element)?;
-                    self.mark_written(s.inst, local);
-                } else if let Some(init) = init {
+                if let Some(init) = init {
                     self.eval_stmt(s, init)?;
                 }
                 self.invalidate_writes(

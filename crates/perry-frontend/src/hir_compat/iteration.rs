@@ -56,14 +56,14 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
     }
 }
 
-fn compared_to_true(expr: &Expr) -> Option<&Expr> {
+fn compared_bool(expr: &Expr) -> Option<(&Expr, bool)> {
     match expr {
         Expr::Compare {
             op: CompareOp::Eq,
             left,
             right,
             ..
-        } if matches!(&**right, Expr::Bool(true)) => Some(left),
+        } if let Expr::Bool(value) = **right => Some((left, value)),
         _ => None,
     }
 }
@@ -126,30 +126,45 @@ impl<'h> Locals<'h> {
         }
     }
 
-    fn is_guard(&self, expr: &Expr) -> bool {
+    fn dense_test(&self, expr: &Expr) -> Option<bool> {
         match expr {
-            Expr::LocalGet(id) => self.guard(*id).is_some(),
-            _ => compared_to_true(expr).is_some_and(|left| self.is_guard(left)),
+            Expr::ArrayIterationPatched => Some(false),
+            Expr::LocalGet(id) => self.guard(*id).map(|_| false),
+            Expr::Unary {
+                op: perry_hir::UnaryOp::Not,
+                operand,
+            } => Some(!self.dense_test(operand)?),
+            _ if let Some((left, value)) = compared_bool(expr) => {
+                Some(self.dense_test(left)? == value)
+            }
+            _ if matches!(
+                runtime(expr),
+                Some(("arrayRecordNeedsIterator", [Expr::LocalGet(_), ..]))
+            ) =>
+            {
+                Some(false)
+            }
+            _ => None,
         }
     }
 
     pub(crate) fn dense_statements<'a>(&self, stmt: &'a Stmt) -> Option<&'a [Stmt]> {
-        let Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-        } = stmt
-        else {
-            return None;
-        };
-        match condition {
-            Expr::Unary {
-                op: perry_hir::UnaryOp::Not,
-                operand,
-            } if matches!(&**operand, Expr::ArrayIterationPatched) => Some(then_branch),
-            condition if self.is_guard(condition) => {
-                Some(else_branch.as_deref().unwrap_or_default())
-            }
+        match stmt {
+            // The builtin array iterator has no observable close operation.
+            Stmt::Try {
+                forof_completion: Some(_),
+                body,
+                ..
+            } => Some(body),
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => Some(if self.dense_test(condition)? {
+                then_branch
+            } else {
+                else_branch.as_deref().unwrap_or_default()
+            }),
             _ => None,
         }
     }
@@ -164,8 +179,8 @@ impl<'h> Locals<'h> {
         else {
             return None;
         };
-        if self.is_guard(condition) {
-            return Some(else_expr);
+        if let Some(test) = self.dense_test(condition) {
+            return Some(if test { then_expr } else { else_expr });
         }
         let Expr::LocalGet(id) = &**else_expr else {
             return None;
@@ -183,7 +198,7 @@ impl<'h> Locals<'h> {
         Some(match runtime(expr)? {
             ("arrayRecordForBound" | "arrayRecordForUpdate", [guard, value, ..])
             | ("arrayRecordForValue", [guard, _, value])
-                if self.is_guard(guard) =>
+                if self.dense_test(guard) == Some(false) =>
             {
                 RecordExpr::Value(value)
             }
@@ -273,7 +288,7 @@ impl<'h> Locals<'h> {
         else {
             return None;
         };
-        let Expr::LocalGet(done) = compared_to_true(condition)? else {
+        let (Expr::LocalGet(done), true) = compared_bool(condition)? else {
             return None;
         };
         let [Stmt::Expr(Expr::LocalSet(id, missing))] = then_branch.as_slice() else {

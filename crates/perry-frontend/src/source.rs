@@ -102,14 +102,28 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
 pub(crate) struct Analysis {
     bindings: HashMap<u32, SourceBinding>,
     pub(crate) classes: HashSet<ast::Id>,
+    arrays: HashSet<ast::Id>,
     pub(crate) sparse_arrays: bool,
 
     pub(crate) names: FreshNames,
 }
 
 impl Analysis {
+    fn binding(&mut self, span: Span) -> &mut SourceBinding {
+        self.bindings.entry(span.lo.0).or_default()
+    }
+
+    pub(crate) fn array_source(&self, source: &ast::Expr) -> bool {
+        match source {
+            ast::Expr::Array(array) => !array.elems.is_empty(),
+            ast::Expr::Ident(id) => self.arrays.contains(&id.to_id()),
+            ast::Expr::Paren(paren) => self.array_source(&paren.expr),
+            _ => false,
+        }
+    }
+
     pub(crate) fn record_iteration(&mut self, span: Span) {
-        let binding = self.bindings.entry(span.lo.0).or_default();
+        let binding = self.binding(span);
         binding.flags.insert(LocalFlags::FOR_OF);
         binding.inferred_end = Some(span.hi.0);
     }
@@ -127,31 +141,34 @@ pub(crate) fn analyze(
     }
 
     impl AstScanner<'_, '_> {
-        fn infer_pattern(&mut self, pattern: &ast::Pat) {
-            pattern_bindings(pattern, &mut |id, annotated| {
-                let binding = self.analysis.bindings.entry(id.span.lo.0).or_default();
-                if !annotated {
-                    binding.inferred_end = Some(id.span.hi.0);
-                }
-                if id.ctxt == self.top_level {
-                    binding.flags.insert(LocalFlags::MODULE);
-                }
-            });
-        }
-
-        fn record_param(&mut self, pat: &ast::Pat) {
+        fn record_pattern(&mut self, pat: &ast::Pat, parameter: bool) {
             walk_pattern(pat, false, &mut |site, annotated| {
-                if annotated {
-                    let span = match site {
-                        BindingSite::Name(id) => id.span,
-                        BindingSite::Pattern(span) => span,
-                    };
-                    self.analysis
-                        .bindings
-                        .entry(span.lo.0)
-                        .or_default()
-                        .flags
-                        .insert(LocalFlags::PARAM_ANNOTATED);
+                let (span, name) = match site {
+                    BindingSite::Name(name) => (name.span, Some(name)),
+                    BindingSite::Pattern(span) => (span, None),
+                };
+                if let Some(name) = name
+                    && !name.optional
+                    && let Some(ann) = &name.type_ann
+                    && ann.type_ann.is_ts_array_type()
+                {
+                    self.analysis.arrays.insert(name.to_id());
+                }
+                if parameter {
+                    if annotated {
+                        self.analysis
+                            .binding(span)
+                            .flags
+                            .insert(LocalFlags::PARAM_ANNOTATED);
+                    }
+                } else if let Some(name) = name {
+                    let binding = self.analysis.binding(span);
+                    if !annotated {
+                        binding.inferred_end = Some(span.hi.0);
+                    }
+                    if name.ctxt == self.top_level {
+                        binding.flags.insert(LocalFlags::MODULE);
+                    }
                 }
             });
         }
@@ -172,12 +189,12 @@ pub(crate) fn analyze(
             array.visit_mut_children_with(self);
         }
         fn visit_mut_param(&mut self, param: &mut ast::Param) {
-            self.record_param(&param.pat);
+            self.record_pattern(&param.pat, true);
             param.visit_mut_children_with(self);
         }
         fn visit_mut_arrow_expr(&mut self, arrow: &mut ast::ArrowExpr) {
             for pat in &arrow.params {
-                self.record_param(pat);
+                self.record_pattern(pat, true);
             }
             arrow.visit_mut_children_with(self);
         }
@@ -188,9 +205,7 @@ pub(crate) fn analyze(
                 for decl in &var.decls {
                     pattern_bindings(&decl.name, &mut |id, _| {
                         self.analysis
-                            .bindings
-                            .entry(id.span.lo.0)
-                            .or_default()
+                            .binding(id.span)
                             .flags
                             .insert(LocalFlags::FOR_HEAD);
                     });
@@ -201,7 +216,7 @@ pub(crate) fn analyze(
         fn visit_mut_for_head(&mut self, head: &mut ast::ForHead) {
             if let ast::ForHead::VarDecl(var) = head {
                 for decl in &mut var.decls {
-                    self.infer_pattern(&decl.name);
+                    self.record_pattern(&decl.name, false);
                     decl.visit_mut_children_with(self);
                 }
             } else {
@@ -210,17 +225,24 @@ pub(crate) fn analyze(
         }
         fn visit_mut_var_decl(&mut self, declaration: &mut ast::VarDecl) {
             for decl in &mut declaration.decls {
-                if decl.init.is_none()
-                    && let ast::Pat::Ident(b) = &decl.name
-                {
-                    self.analysis
-                        .bindings
-                        .entry(b.id.span.lo.0)
-                        .or_default()
-                        .flags
-                        .insert(LocalFlags::DEFERRED);
+                if let ast::Pat::Ident(name) = &decl.name {
+                    match &decl.init {
+                        None => self
+                            .analysis
+                            .binding(name.span)
+                            .flags
+                            .insert(LocalFlags::DEFERRED),
+                        Some(init)
+                            if declaration.kind == ast::VarDeclKind::Const
+                                && name.type_ann.is_none()
+                                && self.analysis.array_source(init) =>
+                        {
+                            self.analysis.arrays.insert(name.to_id());
+                        }
+                        _ => {}
+                    }
                 }
-                self.infer_pattern(&decl.name);
+                self.record_pattern(&decl.name, false);
                 decl.visit_mut_children_with(self);
             }
         }
@@ -240,7 +262,7 @@ pub(crate) fn analyze(
 }
 
 enum BindingSite<'a> {
-    Name(&'a ast::Ident),
+    Name(&'a ast::BindingIdent),
     Pattern(Span),
 }
 
@@ -262,7 +284,7 @@ fn walk_pattern<'a>(
 ) {
     match pat {
         ast::Pat::Ident(binding) => visit(
-            BindingSite::Name(&binding.id),
+            BindingSite::Name(binding),
             inherited || binding.type_ann.is_some(),
         ),
         ast::Pat::Array(array) => {
@@ -279,7 +301,7 @@ fn walk_pattern<'a>(
                 match prop {
                     ast::ObjectPatProp::KeyValue(kv) => walk_pattern(&kv.value, annotated, visit),
                     ast::ObjectPatProp::Assign(assign) => {
-                        visit(BindingSite::Name(&assign.key.id), annotated)
+                        visit(BindingSite::Name(&assign.key), annotated)
                     }
                     ast::ObjectPatProp::Rest(rest) => walk_pattern(&rest.arg, annotated, visit),
                 }

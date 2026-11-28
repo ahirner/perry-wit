@@ -445,7 +445,7 @@ impl<'h> ModuleIndex<'h> {
                     self.scan_expr(scan, value, owner, in_loop);
                     RETURN
                 }
-                Stmt::If { .. } if let Some(branch) = self.locals.dense_statements(stmt) => {
+                _ if let Some(branch) = self.locals.dense_statements(stmt) => {
                     self.scan_stmts(scan, branch, owner, in_loop)
                 }
                 Stmt::If {

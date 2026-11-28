@@ -1,5 +1,4 @@
 //! Lower array/string iteration and byte-stream async iteration before HIR erases types.
-use crate::source::Analysis;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Result};
 use perry_wit_diagnostics::{bail_unsupported, ensure_unsupported};
@@ -14,24 +13,8 @@ pub(crate) fn is_writable_to_web(expr: &perry_hir::ir::Expr) -> bool {
     } if matches!(module.as_str(), "stream" | "node:stream") && class == "Writable" && method == "toWeb")
 }
 
-/// Keep the iteration source, binding pattern, and body together through lexical name resolution.
-pub(super) fn lower(module: &mut ast::Module, analysis: &mut Analysis) -> Result<()> {
-    let mut lower = Loops {
-        analysis,
-        error: None,
-    };
-    module.visit_mut_with(&mut lower);
-    lower.error.map_or(Ok(()), Err)
-}
-
-struct Loops<'n> {
-    analysis: &'n mut Analysis,
-    error: Option<Diagnostic>,
-}
-
-impl Loops<'_> {
-    fn rewrite(&mut self, mut iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
-        let asynchronous = iteration.is_await;
+impl super::Prepare<'_> {
+    pub(super) fn lower_for_of(&mut self, mut iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
         let ast::ForHead::VarDecl(declaration) = &mut iteration.left else {
             bail_unsupported!("iteration requires a const or let binding");
         };
@@ -41,9 +24,7 @@ impl Loops<'_> {
         let [declarator] = declaration.decls.as_mut_slice() else {
             bail_unsupported!("{ONE_BINDING}");
         };
-        if !asynchronous
-            && matches!(&*iteration.right, ast::Expr::Array(array) if !array.elems.is_empty())
-        {
+        if !iteration.is_await && self.analysis.array_source(&iteration.right) {
             return Ok(iteration.into());
         }
         let binding = declarator.name.take();
@@ -51,7 +32,7 @@ impl Loops<'_> {
         let ident = |suffix| ast::Ident::new_no_ctxt(format!("{prefix}{suffix}").into(), DUMMY_SP);
         let source = iteration.right;
         let body = *iteration.body;
-        let statements = if asynchronous {
+        let statements = if iteration.is_await {
             let reader = ident("reader");
             let done = ident("done");
             let step = ident("step");
@@ -60,39 +41,27 @@ impl Loops<'_> {
             let exhausted = false.into_var_decl(ast::VarDeclKind::Let, done.clone().into());
             let read = awaited(method(reader.clone(), "read"))
                 .into_var_decl(ast::VarDeclKind::Const, step.clone().into());
-            let finish = ast::IfStmt {
-                span: DUMMY_SP,
-                test: step.clone().make_member("done".into()).into(),
-                cons: Box::new(
-                    block(vec![
-                        true.make_assign_to(ast::AssignOp::Assign, done.clone().into())
-                            .into_stmt(),
-                        ast::BreakStmt::default().into(),
-                    ])
-                    .into(),
-                ),
-                alt: None,
-            };
+            let finish = when(
+                step.clone().make_member("done".into()),
+                block(vec![
+                    true.make_assign_to(ast::AssignOp::Assign, done.clone().into())
+                        .into_stmt(),
+                    ast::BreakStmt::default().into(),
+                ]),
+            );
             let item = step
                 .make_member("value".into())
                 .into_var_decl(kind, binding);
             let read_loop = ast::WhileStmt {
                 span: DUMMY_SP,
                 test: true.into(),
-                body: Box::new(block(vec![read.into(), finish.into(), item.into(), body]).into()),
+                body: Box::new(block(vec![read.into(), finish, item.into(), body]).into()),
             };
-            let cancel = ast::IfStmt {
-                span: DUMMY_SP,
-                test: ast::UnaryExpr {
-                    span: DUMMY_SP,
-                    op: ast::UnaryOp::Bang,
-                    arg: done.into(),
-                }
-                .into(),
-                cons: Box::new(awaited(method(reader.clone(), "cancel")).into_stmt()),
-                alt: None,
-            };
-            let cleanup = try_finally(cancel.into(), method(reader, "releaseLock").into_stmt());
+            let cancel = when(
+                done.make_eq(false),
+                awaited(method(reader.clone(), "cancel")).into_stmt(),
+            );
+            let cleanup = try_finally(cancel, method(reader, "releaseLock").into_stmt());
             vec![
                 acquired.into(),
                 exhausted.into(),
@@ -124,6 +93,16 @@ impl Loops<'_> {
     }
 }
 
+fn when(test: impl ExprFactory, body: impl Into<ast::Stmt>) -> ast::Stmt {
+    ast::IfStmt {
+        span: DUMMY_SP,
+        test: test.into(),
+        cons: Box::new(body.into()),
+        alt: None,
+    }
+    .into()
+}
+
 fn block(stmts: Vec<ast::Stmt>) -> ast::BlockStmt {
     ast::BlockStmt {
         stmts,
@@ -152,20 +131,6 @@ fn try_finally(body: ast::Stmt, finalizer: ast::Stmt) -> ast::Stmt {
         finalizer: Some(block(vec![finalizer])),
     }
     .into()
-}
-
-impl VisitMut for Loops<'_> {
-    fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
-        statement.visit_mut_children_with(self);
-        if let ast::Stmt::ForOf(iteration) = statement {
-            match self.rewrite(iteration.take()) {
-                Ok(lowered) => *statement = lowered,
-                Err(error) => {
-                    self.error.get_or_insert(error);
-                }
-            }
-        }
-    }
 }
 
 pub(super) fn preserve_options(

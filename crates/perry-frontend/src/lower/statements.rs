@@ -256,15 +256,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 update,
                 body,
             } => {
-                if let Some((id, source)) = self
-                    .shapes
-                    .specialization
-                    .instances
-                    .locals
-                    .for_of(init.as_deref())
-                {
-                    return self.for_of(ctx, id, source, body, label);
-                }
                 let mut cells = loop_cells.to_vec();
                 if let Some(Stmt::Let { id, .. }) = init.as_deref()
                     && self.per_iteration(*id)

@@ -257,9 +257,15 @@ impl<'s> FunctionBuilder<'s, '_> {
         body: &'s [Stmt],
         label: Option<&'s str>,
     ) -> Result<()> {
-        if let Some(init) = init {
-            self.statements(ctx, std::slice::from_ref(init))?;
-        }
+        let source = match self.shapes.specialization.instances.locals.for_of(init) {
+            Some((id, expr)) => Some((id, self.iteration_input(ctx, expr)?)),
+            None => {
+                if let Some(init) = init {
+                    self.statements(ctx, std::slice::from_ref(init))?;
+                }
+                None
+            }
+        };
         let tested = match condition {
             LoopCondition::Before(condition) => condition,
             LoopCondition::After(condition) => Some(condition),
@@ -267,35 +273,30 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         let guards = self.variant_guards.depth();
         self.invalidate_inline_writes(body, tested.into_iter().chain(update.expression));
-        let lowered = self.repeat(
-            ctx,
-            "source",
-            condition,
-            update,
-            None,
-            |b, ctx, next, done| {
-                b.frame.controls.push(Control::Loop {
-                    label,
-                    continue_to: next,
-                    break_to: done,
-                });
-                let lowered = b.statements(ctx, body);
-                b.frame.controls.pop();
-                lowered
-            },
-        );
+        let emit_body = |b: &mut Self, ctx: &mut Context, next, done| {
+            b.frame.controls.push(Control::Loop {
+                label,
+                continue_to: next,
+                break_to: done,
+            });
+            let lowered = b.statements(ctx, body);
+            b.frame.controls.pop();
+            lowered
+        };
+        let lowered = match source {
+            Some((id, input)) => self.iterate(ctx, input, |b, ctx, item, _, next, done| {
+                let item = item.into_value(b, ctx)?;
+                let local = b.initialized_local(ctx, item);
+                b.locals.insert(id, local);
+                emit_body(b, ctx, next, done)
+            }),
+            None => self.repeat(ctx, "source", condition, update, None, emit_body),
+        };
         self.variant_guards.truncate(guards);
         lowered
     }
 
-    pub(super) fn for_of(
-        &mut self,
-        ctx: &mut Context,
-        element: LocalId,
-        source: &'s Expr,
-        body: &'s [Stmt],
-        label: Option<&'s str>,
-    ) -> Result<()> {
+    fn iteration_input(&mut self, ctx: &mut Context, source: &'s Expr) -> Result<Input> {
         if matches!(source, Expr::UrlSearchParamsNew(_)) {
             bail_unsupported!(
                 "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
@@ -303,7 +304,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let value = self.expression(ctx, source)?;
         let value = self.defined(ctx, value)?;
-        let input = match kind(ctx, value)? {
+        Ok(match kind(ctx, value)? {
             Kind::Array => Input::LiveArray(value),
             Kind::String => Input::String(value),
             Kind::Record if self.shapes.collection(ctx, value.get_type(ctx)).is_some() => {
@@ -312,24 +313,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             _ => bail_unsupported!(
                 "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
             ),
-        };
-        let guards = self.variant_guards.depth();
-        self.invalidate_inline_writes(body, []);
-        let result = self.iterate(ctx, input, |b, ctx, item, _, next, done| {
-            let item = item.into_value(b, ctx)?;
-            let local = b.initialized_local(ctx, item);
-            b.locals.insert(element, local);
-            b.frame.controls.push(Control::Loop {
-                label,
-                continue_to: next,
-                break_to: done,
-            });
-            let result = b.statements(ctx, body);
-            b.frame.controls.pop();
-            result
-        });
-        self.variant_guards.truncate(guards);
-        result
+        })
     }
 }
 
