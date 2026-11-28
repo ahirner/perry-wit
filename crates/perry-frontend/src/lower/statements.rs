@@ -55,7 +55,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                             }
                             Ok(value)
                         },
-                        |b, ctx| b.expression_with(ctx, element.missing, Some(element_ty)),
+                        |b, ctx| b.absent_literal(ctx, false, Some(element_ty)),
                     )?;
                     let binding = self.initialized_local(ctx, value);
                     self.variant_guards.assign(element.id);
@@ -88,6 +88,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         label: Option<&'s str>,
         loop_cells: &[LocalId],
     ) -> Result<()> {
+        let locals = &self.shapes.specialization.instances.locals;
+        if let Some(body) = locals.dense_statements(statement) {
+            return self.statements(ctx, body);
+        }
         match statement {
             Stmt::If {
                 condition: Expr::ThisProvenClass(class_name),
@@ -100,22 +104,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                     self.statements(ctx, else_branch)?;
                 }
             }
-            Stmt::If {
-                condition,
-                else_branch,
-                ..
-            } if self
-                .shapes
-                .specialization
-                .instances
-                .locals
-                .is_guard(condition) =>
-            {
-                if let Some(else_branch) = else_branch {
-                    self.statements(ctx, else_branch)?;
-                }
-            }
             Stmt::Let { id, init, .. } => {
+                let init = locals.initializer(*id, init.as_ref());
                 let storage = self.local_storage(*id);
                 if matches!(storage, Some(Storage::ErasedFunction(_))) {
                     if let Some(expr) = init {
@@ -123,7 +113,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                     return Ok(());
                 }
-                let init = init.as_ref();
                 if matches!(
                     storage,
                     Some(Storage::Boxed {
@@ -142,7 +131,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
-            Stmt::Return(value) => {
+            Stmt::Return(value, _) => {
                 let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.named.get(&id).and_then(Signature::source)
                     .is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
@@ -267,15 +256,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 update,
                 body,
             } => {
-                if let Some((id, source)) = self
-                    .shapes
-                    .specialization
-                    .instances
-                    .locals
-                    .for_of(init.as_deref())
-                {
-                    return self.for_of(ctx, id, source, body, label);
-                }
                 let mut cells = loop_cells.to_vec();
                 if let Some(Stmt::Let { id, .. }) = init.as_deref()
                     && self.per_iteration(*id)
@@ -297,6 +277,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Stmt::Switch {
                 discriminant,
                 cases,
+                ..
             } => self.switch(ctx, discriminant, cases, label)?,
             Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {
                 let (jump, label) = match statement {

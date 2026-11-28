@@ -93,7 +93,7 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
         ),
         (
             "export function run(): number { new PerformanceObserver(() => {}); return 1; }",
-            "new PerformanceObserver",
+            "new PerformanceObserver(() => {})",
             "requires the runtime to call a guest function",
         ),
         (
@@ -103,12 +103,17 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
         ),
         (
             "const m = new Map(); const alias = m; alias.set('k', () => 2);",
-            "alias.set",
+            "alias.set('k', () => 2)",
             "storing a function value with Map.set",
         ),
         (
             "export function run(): number { queueMicrotask(() => {}); return 1; }",
             "queueMicrotask(() => {})",
+            "queueMicrotask is not supported",
+        ),
+        (
+            "export function run(): void { queueMicrotask(); }",
+            "queueMicrotask()",
             "queueMicrotask is not supported",
         ),
         (
@@ -134,12 +139,15 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
             diagnostic.message().contains(needle),
             "expected '{needle}' in: {err}"
         );
-        assert_eq!(
-            diagnostic.span().context("diagnostic span")?.start_byte,
-            source.rfind(at).unwrap(),
-            "{err}"
-        );
+        let span = diagnostic.span().context("diagnostic span")?;
+        assert_eq!(&source[span.start_byte..span.end_byte], at, "{err}");
     }
+    perry_wit::compile_core(
+        "class Counter { value=1; nextTick(n:number) { return this.value+n; } }
+         function sum(queueMicrotask:(n:number)=>number) { return queueMicrotask(2); }
+         export function run():number { const process=new Counter(); return process.nextTick(sum(n=>n+1)); }",
+        "shadow.ts",
+    )?;
     let non_callable = "export function run(): number { const x = 1; return x(); }";
     let err = perry_wit::compile_core(non_callable, "call.ts").unwrap_err();
     assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");

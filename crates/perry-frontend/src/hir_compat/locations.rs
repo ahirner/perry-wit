@@ -9,7 +9,6 @@ use std::{
 use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitWith};
 
-const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
 
 pub(crate) fn has_source_offset(offset: u32) -> bool {
@@ -89,53 +88,70 @@ pub(crate) struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
     calls: HashMap<u32, Span>,
-    disposals: HashSet<(u32, u32)>,
     members: HashMap<u32, Span>,
+    pattern_keys: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
-    operators: Vec<Span>,
+    operators: HashMap<u32, Span>,
+    assignments: HashMap<u32, Span>,
     origins: HashMap<String, CallerOrigin>,
 }
 
 impl<'s> Locations<'s> {
-    pub(crate) fn preserve_expression(&mut self, expr: &mut ast::Expr) {
+    pub(crate) fn bind_expression(&mut self, expr: &mut ast::Expr) {
         use swc_common::util::take::Take;
-        let span = expr.span();
-        let token = if matches!(expr, ast::Expr::TsNonNull(_)) {
-            NON_NULL.to_owned()
-        } else {
-            let token = format!("{OPERATOR}{}", self.operators.len());
-            self.operators.push(span);
-            token
-        };
-        let original = expr.take();
-        *expr = ast::SeqExpr {
-            span,
-            exprs: vec![
-                Box::new(
-                    ast::Lit::Str(ast::Str {
-                        span,
-                        value: token.into(),
-                        raw: None,
-                    })
-                    .into(),
-                ),
-                Box::new(original),
-            ],
+        if expr.span().is_dummy() {
+            return;
         }
-        .into();
-    }
-    pub(crate) fn operator_raw_span(&self, parts: &[Expr]) -> Option<Span> {
-        let [Expr::String(token), _] = parts else {
-            return None;
-        };
-        let index: usize = token.strip_prefix(OPERATOR)?.parse().ok()?;
-        self.operators.get(index).copied()
+        match expr {
+            ast::Expr::TsNonNull(assertion) => {
+                *expr = ast::SeqExpr {
+                    span: assertion.span,
+                    exprs: vec![Box::new(NON_NULL.into()), assertion.expr.take()],
+                }
+                .into();
+            }
+            ast::Expr::Assign(a) => {
+                if let ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(m)) = &a.left {
+                    self.assignments.insert(m.prop.span().lo.0, a.span);
+                }
+            }
+            ast::Expr::Bin(b) => self.bind_operator(&mut b.span, b.left.span().hi),
+            ast::Expr::Cond(c) => self.bind_operator(&mut c.span, c.test.span().hi),
+            _ => {}
+        }
     }
 
-    pub(crate) fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
-        self.operator_raw_span(parts)
-            .and_then(|span| self.span(span))
+    fn bind_operator(&mut self, site: &mut Span, after_left: swc_common::BytePos) {
+        let full = *site;
+        // Left-associated operators can share their first byte. Give the outer
+        // operator the end of its left operand as its distinct HIR source offset.
+        if self.operators.contains_key(&site.lo.0) {
+            site.lo = after_left;
+        }
+        self.operators.insert(site.lo.0, full);
+    }
+
+    pub(crate) fn expression_span(&self, expr: &Expr) -> Option<Span> {
+        let spans = match expr {
+            Expr::Binary { .. }
+            | Expr::Logical { .. }
+            | Expr::Compare { .. }
+            | Expr::Conditional { .. } => &self.operators,
+            Expr::PropertySet { .. }
+            | Expr::IndexSet { .. }
+            | Expr::PutValueSet { .. }
+            | Expr::StaticFieldSet { .. } => &self.assignments,
+            Expr::New { .. }
+            | Expr::NewDynamic { .. }
+            | Expr::NewDynamicSpread { .. }
+            | Expr::NativeMethodCall { .. }
+            | Expr::Call { .. }
+            | Expr::CallSpread { .. }
+            | Expr::StaticMethodCall { .. } => &self.calls,
+            _ => return None,
+        };
+        spans.get(&expr.byte_offset()?).copied()
     }
 
     pub(crate) fn add(&mut self, path: PathBuf, source: &'s str) -> Result<u32> {
@@ -358,8 +374,15 @@ impl<'s> Locations<'s> {
             .get(..(span.hi.0.checked_sub(span.lo.0)?) as usize)
     }
 
+    fn member_source(&self, offset: u32) -> Option<Span> {
+        self.members
+            .get(&offset)
+            .or_else(|| self.pattern_keys.get(&offset))
+            .copied()
+    }
+
     pub(crate) fn member_text(&self, offset: u32) -> Option<&'s str> {
-        self.source_text(*self.members.get(&offset)?)
+        self.source_text(self.member_source(offset)?)
     }
 
     pub(crate) fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
@@ -369,10 +392,6 @@ impl<'s> Locations<'s> {
         ))
     }
 
-    pub(crate) fn calls_dispose(&self, start: u32, end: u32) -> bool {
-        self.disposals.contains(&(start, end))
-    }
-
     pub(crate) fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.calls
             .get(&byte_offset)
@@ -380,10 +399,13 @@ impl<'s> Locations<'s> {
             .or_else(|| self.offset_span(byte_offset, 1))
     }
 
+    pub(crate) fn is_pattern_key(&self, byte_offset: u32) -> bool {
+        self.pattern_keys.contains_key(&byte_offset)
+    }
+
     pub(crate) fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
-        self.members
-            .get(&byte_offset)
-            .and_then(|span| self.span(*span))
+        self.member_source(byte_offset)
+            .and_then(|span| self.span(span))
             .or_else(|| self.call_span(byte_offset))
     }
 
@@ -421,13 +443,12 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.span(span))
     }
 
-    pub(super) fn collect(
-        &mut self,
-        module: &perry_parser::swc_ecma_ast::Module,
-        unresolved: swc_common::SyntaxContext,
-    ) {
+    pub(crate) fn annotate_expression(&self, error: Diagnostic, expr: &Expr) -> Diagnostic {
+        error.with_fallback_span(self.expression_span(expr).and_then(|span| self.span(span)))
+    }
+
+    pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
         struct Collector<'a, 's> {
-            unresolved: swc_common::SyntaxContext,
             locations: &'a mut Locations<'s>,
             class_name: Option<String>,
         }
@@ -468,23 +489,43 @@ impl<'s> Locations<'s> {
             }
             fn visit_call_expr(&mut self, call: &ast::CallExpr) {
                 if call.span.lo.0 != 0 {
+                    let token = match &call.callee {
+                        ast::Callee::Expr(callee) => match callee.unwrap_with(|e| match e {
+                            ast::Expr::Paren(p) => Some(&p.expr),
+                            ast::Expr::TsAs(t) => Some(&t.expr),
+                            ast::Expr::TsNonNull(t) => Some(&t.expr),
+                            ast::Expr::TsSatisfies(t) => Some(&t.expr),
+                            ast::Expr::TsTypeAssertion(t) => Some(&t.expr),
+                            ast::Expr::TsConstAssertion(t) => Some(&t.expr),
+                            _ => None,
+                        }) {
+                            ast::Expr::Member(m) => m.prop.span().lo,
+                            ast::Expr::SuperProp(m) => m.prop.span().lo,
+                            _ => call.span.lo,
+                        },
+                        _ => call.span.lo,
+                    };
+                    // Native calls use the call start, ordinary methods use the member token.
                     self.locations.calls.insert(call.span.lo.0, call.span);
-                    if let ast::Callee::Expr(callee) = &call.callee
-                        && let ast::Expr::Member(member) = callee.unwrap_parens()
-                        && let ast::MemberProp::Computed(prop) = &member.prop
-                        && let ast::Expr::Member(symbol) = prop.expr.unwrap_parens()
-                        && matches!(&*symbol.obj, ast::Expr::Ident(id) if id.sym == "Symbol" && id.ctxt == self.unresolved)
-                        && matches!(&symbol.prop,ast::MemberProp::Ident(id) if id.sym=="dispose")
-                    {
-                        self.locations
-                            .disposals
-                            .insert((call.span.lo.0, call.span.hi.0));
-                    }
+                    self.locations.calls.insert(token.0, call.span);
                 }
                 call.visit_children_with(self);
             }
+            fn visit_object_pat_prop(&mut self, prop: &ast::ObjectPatProp) {
+                let key = match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => Some(kv.key.span()),
+                    ast::ObjectPatProp::Assign(a) => Some(a.key.span()),
+                    ast::ObjectPatProp::Rest(_) => None,
+                };
+                if let Some(span) = key {
+                    self.locations.pattern_keys.insert(span.lo.0, span);
+                }
+                prop.visit_children_with(self);
+            }
             fn visit_member_expr(&mut self, member: &ast::MemberExpr) {
-                self.locations.members.insert(member.span.lo.0, member.span);
+                self.locations
+                    .members
+                    .insert(member.prop.span().lo.0, member.span);
                 member.visit_children_with(self);
             }
             fn visit_new_expr(&mut self, new_expr: &ast::NewExpr) {
@@ -562,7 +603,6 @@ impl<'s> Locations<'s> {
             }
         }
         module.visit_with(&mut Collector {
-            unresolved,
             locations: self,
             class_name: None,
         });

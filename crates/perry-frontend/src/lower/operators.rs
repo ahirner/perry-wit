@@ -566,11 +566,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Expr::Sequence(parts) = expr
             && let Some((last, effects)) = parts.split_last()
         {
-            if let Some(span) = self.shapes.locations.operator_span(parts) {
-                return self
-                    .condition(ctx, last)
-                    .map_err(|e| e.with_fallback_span(Some(span)));
-            }
             for effect in effects {
                 self.effect(ctx, effect)?;
             }
@@ -580,6 +575,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             op: op @ (LogicalOp::And | LogicalOp::Or),
             left,
             right,
+            ..
         } = expr
         {
             let lhs = self.condition(ctx, left)?;

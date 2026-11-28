@@ -52,15 +52,27 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
     assert!(diagnostic.help().is_some());
     assert!(std::error::Error::source(&error).is_some());
 
-    let helper =
-        "// é🙂\r\nexport function helper(value:number):number {\r\n return value ** 1;\r\n}";
-    program.modules[0].contents = helper.as_bytes().to_vec();
-    let error = api::compile_core(&program).unwrap_err();
-    assert_eq!(error.primary().code(), codes::UNSUPPORTED_OPERATOR);
-    let span = error.primary().span().unwrap();
-    assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
-    assert_eq!(&helper[span.start_byte..span.end_byte], "value ** 1");
-    assert_eq!((span.start_line, span.start_column), (3, 9));
+    for (expression, failing) in [
+        ("value ** 1", "value ** 1"),
+        ("value | 1n | 2", "value | 1n"),
+        ("value | 1 | 2n", "value | 1 | 2n"),
+        ("value ** 1 ? 2 : 3", "value ** 1"),
+    ] {
+        let helper = format!(
+            "// é🙂\r\nexport function helper(value:number):number {{\r\n return {expression};\r\n}}"
+        );
+        program.modules[0].contents = helper.as_bytes().to_vec();
+        let error = api::compile_core(&program).unwrap_err();
+        assert_eq!(
+            error.primary().code(),
+            codes::UNSUPPORTED_OPERATOR,
+            "{error}"
+        );
+        let span = error.primary().span().unwrap();
+        assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
+        assert_eq!(&helper[span.start_byte..span.end_byte], failing);
+        assert_eq!((span.start_line, span.start_column), (3, 9));
+    }
 
     for expression in [
         "(value as any)(1)",
@@ -480,7 +492,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         (regex("(input === 'x' ? /a/g : /a/)"), "case.ts:1:55: error[unsupported-construct]: regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag".into()),
         (regex("/\\uD800/u"), format!("{REGEX_CONST}Unpaired surrogate in regex escape")),
         (regex("new RegExp(input)"), "case.ts:1:55: error[unsupported-construct]: RegExp construction is unsupported; use a bounded regex literal".into()),
-        ("export function test(): boolean { return /a/ === /a/; }".into(), "case.ts:1:8: error[unsupported-construct]: regex object identity is outside the literal matching profile".into()),
+        ("export function test(): boolean { return /a/ === /a/; }".into(), "case.ts:1:42: error[unsupported-construct]: regex object identity is outside the literal matching profile".into()),
         ("export function run(x: number): number { return x ** (2 ** x); }".into(), "case.ts:1:55: error[unsupported-operator]: operator Pow is not supported yet".into()),
         ("function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }".into(), "case.ts:1:1: error[unsupported-construct]: generator function count is not supported yet".into()),
         ("export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }".into(), "case.ts:1:48: error[unsupported-type]: unresolved generic type WeakMap is not supported yet".into()),

@@ -127,11 +127,17 @@ class Box<T> {
 const box = new Box(3);
 const args: [string] = ["x"];
 console.log(box.contains<string>(...args), box.contains(true));
-function outer<T>(value:T){
-  function inner<T>(items:T[]){const s=new Set<T>(); s.add(items[0]); console.log(value); return s.has(items[0]);}
-  return inner(["x"]);
+function outer<T extends number>(value: T) {
+  function first<T>(items: T[]): T {
+    const seen = new Set<T>(); seen.add(items[0]);
+    console.log(value, seen.has(items[0]));
+    return items[0];
+  }
+  const head = function<T>(items: T[]): T { return items[0]; };
+  const identity = <T>(item: T): T => item;
+  return first(["xy"]).length + head<string>(["abc"]).length + identity<number>(first<number>([3]));
 }
-console.log(outer(4));
+console.log(outer<number>(4));
 const set = Box.empty<string>(); set.add("x"); console.log(set.has("x"));
 function left<T>(): Set<T> { return new Set<T>(); }
 function right<T>(): Set<T> { return new Set<T>(); }
@@ -144,7 +150,7 @@ interface Map<T> { size: T }
 function label(entry: Map<string>) { return entry.size.toUpperCase(); }
 console.log(label(JSON.parse<Map<string>>('{"size":"box"}')));
 "#,
-            "3\n3\ntrue true\n4\ntrue\ntrue\ntrue true\nBOX\n",
+            "3\n3\ntrue true\n4 true\n4 true\n8\ntrue\ntrue true\nBOX\n",
         ),
         (
             "generic_promise_settles_after_specialization",

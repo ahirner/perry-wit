@@ -254,7 +254,7 @@
               ./js/site/package.json
             ];
           };
-          hash = "sha256-9Y3qAvlTkHiJ4kmhubIMiWUkH1ec9nqLXTto6Bd3WEw=";
+          hash = "sha256-V2eygt0HHWi2r6FJRS5KW5v6KEKnJqPS4zJTxqzl3l8=";
         };
 
         # npm package as the tarball `npm pack` writes, with bindings generated from the compiler component
@@ -470,6 +470,16 @@
               echo "Built js/site/dist. Refresh the existing preview to load it."
             '';
           }}/bin/build-site";
+        };
+
+        apps.bump-version = {
+          type = "app";
+          meta.description = "Update the compiler, WIT and npm release versions";
+          program = "${pkgs.writeShellApplication {
+            name = "bump-version";
+            runtimeInputs = [ pkgs.prefetch-npm-deps (pkgs.python3.withPackages (p: [ p.semver p.tomlkit ])) ];
+            text = ''exec python3 ${./scripts/bump-version.py} "$@"'';
+          }}/bin/bump-version";
         };
 
         apps.bench-perry = {

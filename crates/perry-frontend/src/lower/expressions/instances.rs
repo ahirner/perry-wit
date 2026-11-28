@@ -24,18 +24,20 @@ impl<'s> FunctionBuilder<'s, '_> {
         required: bool,
     ) -> Result<Option<Value>> {
         let site = self.site(expr)?;
-        let Some(conversion) = site.conversion() else {
-            return self.instance_value(ctx, expr, expected, site.resolution, required);
+        let result = if let Some(conversion) = site.conversion() {
+            if !conversion.reads_operand() {
+                self.discard_function_operand(ctx, expr)?;
+            }
+            conversion
+                .emit(self, ctx, expected, |b, ctx, input| {
+                    b.instance_value(ctx, expr, input, site.resolution, true)?
+                        .ok_or_else(|| internal!("missing function operand"))
+                })
+                .map(Some)
+        } else {
+            self.instance_value(ctx, expr, expected, site.resolution, required)
         };
-        if !conversion.reads_operand() {
-            self.discard_function_operand(ctx, expr)?;
-        }
-        conversion
-            .emit(self, ctx, expected, |b, ctx, input| {
-                b.instance_value(ctx, expr, input, site.resolution, true)?
-                    .ok_or_else(|| internal!("missing function operand"))
-            })
-            .map(Some)
+        result.map_err(|e| self.shapes.locations.annotate_expression(e, expr))
     }
     pub(in crate::lower) fn instance_value(
         &mut self,
@@ -82,8 +84,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 hir_compat::MemberKey::Computed(index, _) => {
                     self.set_index(ctx, object, index, value).map(Some)
                 }
-            }
-            .map_err(|e| self.shapes.annotate_member(e, key.offset()));
+            };
         }
         let value = match expr {
             Expr::PropertyUpdate {

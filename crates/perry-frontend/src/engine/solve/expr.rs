@@ -42,6 +42,14 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn eval_expr(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<Ty> {
+        let previous = s.current_span;
+        s.current_span = self.hir.locations.expression_span(expr).or(previous);
+        let result = self.eval_value(s, expr);
+        s.current_span = previous;
+        result
+    }
+
+    fn eval_value(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<Ty> {
         if let Some(record) = self.index.locals.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(inner) => self.eval_expr(s, inner),
@@ -54,6 +62,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                     Ok(Ty::NUMBER)
                 }
                 hir_compat::RecordExpr::Close => Ok(Ty::VOID),
+                hir_compat::RecordExpr::RestAppend(array, item) => {
+                    let array = self.eval_expr(s, array)?;
+                    let ty = self.eval_expr(s, item)?;
+                    self.push_values(s.inst, array, std::slice::from_ref(item), &[ty]);
+                    Ok(array)
+                }
             };
         }
         let declared = self.index.expressions.declared(expr);
@@ -128,8 +142,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 hir_compat::MemberKey::Computed(index, _) => self.eval_expr(s, index)?,
             };
             let ty = self.eval_expr(s, value)?;
-            if let hir_compat::MemberKey::Named(name, offset) = key {
-                self.assign_property(s, expr, receiver, name, value, ty, offset)?;
+            if let Some(name) = key.name() {
+                self.assign_property(s, expr, receiver, name, value, ty)?;
             }
             self.write_cell_indexed(receiver, key_type, ty);
             self.coerce_array_write(s.inst, receiver, std::slice::from_ref(value), &[ty]);
@@ -271,14 +285,18 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(ty)
             }
-            Expr::Binary { op, left, right } => {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
                 Ok(builtins::binary_result(self.types, *op, l, r))
             }
             Expr::Unary { op, operand } => {
                 Ok(builtins::unary_result(*op, self.eval_expr(s, operand)?))
             }
-            Expr::Logical { op, left, right } => {
+            Expr::Logical {
+                op, left, right, ..
+            } => {
                 let l = self.eval_expr(s, left)?;
                 let depth = s.guards.depth();
                 if matches!(op, LogicalOp::And | LogicalOp::Or) {
@@ -301,6 +319,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 condition,
                 then_expr,
                 else_expr,
+                ..
             } => {
                 self.eval_expr(s, condition)?;
                 let guard = DefinedGuard::of(condition);
@@ -327,15 +346,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(joined)
             }
             Expr::Sequence(parts) => {
-                if let Some(span) = self.hir.locations.operator_raw_span(parts)
-                    && let Some(last) = parts.last()
-                {
-                    let prev = s.current_span;
-                    s.current_span = Some(span);
-                    let res = self.eval_expr(s, last);
-                    s.current_span = prev;
-                    return res;
-                }
                 let mut last = Ty::VOID;
                 for part in parts {
                     last = self.eval_expr(s, part)?;
@@ -350,7 +360,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 self.eval_expr(s, body)
             }
-            Expr::Await(promise) => {
+            Expr::Await(promise, _) => {
                 let ty = self.eval_expr(s, promise)?;
                 let ty = self.resolve_cell_read(s.inst, ty);
                 Ok(self.awaited_type(s.inst, ty))
@@ -586,7 +596,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(Ty::OPEN)
             }
             Expr::NativeMethodCall {
-                module,
                 object,
                 method,
                 args,
@@ -595,15 +604,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if hir_compat::is_writable_to_web(expr) {
                     self.eval_args(s, args)?;
                     return Ok(self.types.named(self.ctx, "WritableStream"));
-                }
-                if hir_compat::is_object_coercibility_check(module, method) {
-                    return match args.first() {
-                        Some(a) => {
-                            let ty = self.eval_expr(s, a)?;
-                            Ok(self.types.strip_nullish(ty).0)
-                        }
-                        None => Ok(Ty::OPEN),
-                    };
                 }
                 let arg_tys = self.eval_args(s, args)?;
                 if let Some(obj) = object {
@@ -698,11 +698,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(Ty::STRING)
             }
-            Expr::Compare { op, left, right }
-                if matches!(
-                    op,
-                    CompareOp::Eq | CompareOp::Ne | CompareOp::LooseEq | CompareOp::LooseNe
-                ) =>
+            Expr::Compare {
+                op, left, right, ..
+            } if matches!(
+                op,
+                CompareOp::Eq | CompareOp::Ne | CompareOp::LooseEq | CompareOp::LooseNe
+            ) =>
             {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
                 if l != Ty::BOTTOM

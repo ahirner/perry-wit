@@ -246,15 +246,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             (Kind::Record, field) => match Member::field(ctx, value, field, None) {
                 Ok(member) => member.read(self, ctx)?,
-                Err(_)
-                    if self
-                        .shapes
-                        .specialization
-                        .instances
-                        .locals
-                        .object_pattern_offset(object)
-                        .is_some() =>
-                {
+                Err(_) if self.shapes.locations.is_pattern_key(byte_offset) => {
                     self.absent_literal(ctx, false, None)?
                 }
                 Err(error) => return Err(error),

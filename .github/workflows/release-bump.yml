@@ -1,0 +1,42 @@
+name: Prepare release PR
+
+on:
+  push:
+    branches: ['release/*']
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    if: github.event.created
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - name: Prepare version bump
+        run: nix run .#bump-version -- -- "${GITHUB_REF_NAME#release/}"
+      - name: Commit the bump and open the PR
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
+        run: |
+          title="chore: bump version to ${GITHUB_REF_NAME#release/}"
+          if ! git diff --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -am "$title"
+            gh auth setup-git
+            git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
+          fi
+
+          if git diff --quiet origin/main...HEAD; then exit 0; fi
+          pulls=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f base=main \
+            -f head="$GITHUB_REPOSITORY_OWNER:$GITHUB_REF_NAME" --jq 'length')
+          if [[ "$pulls" == 0 ]]; then
+            gh pr create --base main --head "$GITHUB_REF_NAME" --title "$title" \
+              --body "Update the Rust compiler, WIT package and npm SDK to ${GITHUB_REF_NAME#release/}, including both lockfiles and the Nix npm dependency hash."
+          fi

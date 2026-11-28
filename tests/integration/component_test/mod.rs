@@ -1040,13 +1040,16 @@ fn static_modules_preserve_pattern_bindings_and_property_keys() -> Result<()> {
     let declarations = r#"
         let calls = 0;
         function mark(n: number): number { calls += 1; return n; }
-        let items: (number | undefined)[] = [undefined, 2, 3, 4];
+        let items: (number | undefined)[] = [undefined, 2, , 4];
         function reset(): number { items = [9]; return mark(1); }
         const [first = reset(), , ...rest] = items;
+        const [...copy] = items;
+        copy[0] = 7;
         interface Row { zero: number; absent?: number; nest: { key: number } }
         const row: Row = { zero: 0, nest: { key: 4 } };
         const {zero = mark(9), absent = mark(8), nest: {key: renamed}} = row;
         function score(first: number): number {
+            if (!(0 in rest) || rest[0] !== undefined || rest[1] !== 4 || items[0] !== 9) return -1;
             return calls * 1000 + zero * 100 + absent * 10 + renamed + first + rest.length;
         }
     "#;

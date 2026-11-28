@@ -224,7 +224,7 @@ fn array_callbacks_and_iteration_survive_forced_collection() {
 function twice(n:number) {return n*2;}
 function nothing(n:number) {}
 function missingDefault():number {throw new Error('missing');}
-function refill(values:number[]) {values.push(1,2);return 8;}
+function refill(values:number[]) {values.push(1,2,3);return 8;}
 export function callbacks() {
  let calls=0;
  const numbers:number[]=[1,2,3];
@@ -258,8 +258,29 @@ export function callbacks() {
  if(retained[0].label!=='cell0' || retained[1].label!=='cell1')return 10;
  return small.filter(nothing).length;
 }
+function tail(values: string[]):string[] { const [, ...rest] = values; return rest; }
+function captures<T>(values:T[], replacement:T) {
+ const original=values, readers=[];
+ for (let item of values) {
+   readers.push(()=>item);
+   if (readers.length===1) { item=replacement; values=[]; original.push(original[0]); }
+ }
+ return readers.length===3 && readers[0]()===replacement && readers[1]()===original[1] && readers[2]()===original[0];
+}
 class IterationName { $$perryIteration(): number { return 13; } }
 export function iteration() {
+ if (!captures([1,2],7) || !captures(['a','b'],'c')) return 11;
+ let calls=0;
+ const functions=[];
+ for (let x of [++calls, ++calls]) { functions.push(()=>x); x+=10; }
+ if (calls!==2 || functions[0]()!==11 || functions[1]()!==12) return 9;
+ let sum=0;
+ for (const value of [1,,3]) { sum+=value ?? 5; }
+ for (const [a,b] of [[1,2],[3,4]]) { sum+=a+b; }
+ for (const text of [...tail(['unused','1970-01-01T00:00:00.001Z'])]) {
+   sum += new Date(text).getTime();
+ }
+ if (sum!==20) return 10;
  if (new IterationName().$$perryIteration() !== 13) return 6;
  let steps = 0;
  outer: for (const row of [[1, 2], [3]]) {
@@ -275,7 +296,7 @@ export function iteration() {
  if (left.map(select)[0] !== 5 || right.map(select)[0] !== 7) return 8;
  const values:number[]=[1,2];
  let visits=0;
- for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
+ for(const n of values){visits++;if(n===1){values.push(3,4);continue;}if(n===3)values.pop();}
  let text='';
  for(const word of 'c,d'.split(',')){text+=word;}
  const [first, , missing = visits + 4] = values;
@@ -286,10 +307,15 @@ export function iteration() {
  let thrown=0;
  try {const [value = missingDefault()] = []; } catch(e) {thrown++;}
  if(thrown!==1)return 4;
+ try {
+   for (const n of values) { try { missingDefault(); } finally { thrown++; } }
+ } catch(e) { if(e.message==='missing')thrown++; }
+ if(thrown!==3)return 12;
  const exhausted:number[]=[];
- const [filled=refill(exhausted), stillMissing=9]=exhausted;
- if(filled!==8 || stillMissing!==9)return 5;
- for(const scalar of 'é🙂a'){text+=scalar+':';}
+ const [filled=refill(exhausted), stillMissing=9, ...afterDefault]=exhausted;
+ if(filled!==8 || stillMissing!==9 || afterDefault.length!==0)return 5;
+ const __perry_loop_0_element = 'é🙂a';
+ for(const scalar of __perry_loop_0_element){text+=scalar+':';}
  return visits===3 && text==='cdé:🙂:a:' ? 0 : 1;
 }
 "#;
