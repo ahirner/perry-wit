@@ -334,3 +334,13 @@ const causeHolder: { value: unknown } = { value: { id: 1, tags: ["a"] } as { id:
 const holderCast = causeHolder.value as { id: number; tags: string[] };
 holderCast.tags.push("b");
 console.log("cast-identity", causeCast === causeItems, causeItems.length, causeCast === (causeError.cause as number[]), JSON.stringify(causeHolder.value));
+
+export interface Batch<T> { values: T[] }
+async function unpack<T>(text: string): Promise<T[]> {
+  const values: T[] = [];
+  const batch: Batch<T> = JSON.parse(text);
+  for (const value of batch.values) values.push(value);
+  return values;
+}
+console.log(JSON.stringify(await unpack<string>('{"values":[]}')));
+console.log(JSON.stringify(await unpack<string>('{"values":["second","first"]}')));

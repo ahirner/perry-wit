@@ -360,18 +360,50 @@ fn persistent_aliases_share_one_layout_across_specialized_exports() -> Result<()
 }
 
 #[test]
+fn named_list_callbacks_preserve_wit_record_fields() -> Result<()> {
+    boundary!(
+        r#"package test:tracks;
+world boundary {
+  record track { title: string, artist: string }
+  type playlist = list<track>;
+  export describe: func(tracks: playlist, rename: bool) -> string;
+}"#
+    );
+    let source = r#"
+import type { Playlist } from './types/world';
+export function describe(tracks: Playlist, rename: boolean): string {
+  const first = tracks.find(track => track.title.length > 0);
+  if (first === undefined) return "";
+  const result = rename ? { ...first, title: "remix" } : first;
+  return result.title + "/" + result.artist;
+}"#;
+    let mut component = Instance::compile(WIT, source)?;
+    let tracks = vec![Track {
+        title: "dawn".into(),
+        artist: "quartet".into(),
+    }];
+    for (rename, expected) in [(false, "dawn/quartet"), (true, "remix/quartet")] {
+        component.check("describe", (&tracks, rename), &expected.to_owned())?;
+    }
+    component.check("describe", (Vec::<Track>::new(), false), &String::new())
+}
+
+#[test]
 fn exact_integer_transport_in_nested_results_and_options() -> Result<()> {
     boundary!(
         r#"package test:integers;
 world boundary {
   record packet { signed: s64, unsigned: u64, optional: option<u64> }
+  record point { x: s64, y: u32 }
   export echo: func(value: packet) -> result<packet, string>;
+  export on-axis: func(x: option<f64>) -> option<point>;
   export extremes: func() -> list<s64>;
   export describe-wide: func(value: u64) -> string;
   export throw-wide: func(value: s64) -> result<s64, s64>;
 }"#
     );
     let source = r#"
+import type { Point } from './types/world';
 interface Packet { signed: bigint; unsigned: bigint; optional: bigint | undefined }
 type Answer = { ok: true; value: Packet } | { ok: false; error: string };
 export function echo(value: Packet) {
@@ -381,6 +413,10 @@ export function echo(value: Packet) {
   return { ok: false, error: 'wrong bits' };
 }
 export function extremes() { return [-9223372036854775808n, -1n, 0n, 9223372036854775807n]; }
+export function onAxis(x: number | null): Point | null {
+  const point: Point | null = x !== null ? { x: BigInt(x), y: 0 } : null;
+  return point;
+}
 export function describeWide(value: bigint) { return typeof value + ':' + String(value); }
 export function throwWide(value: bigint): bigint { throw -value; }
 "#;
@@ -397,6 +433,13 @@ export function throwWide(value: bigint): bigint { throw -value; }
         );
     }
     instance.check("extremes", (), &vec![i64::MIN, -1, 0, i64::MAX])?;
+    for x in [None, Some(-1), Some(2)] {
+        instance.check(
+            "on-axis",
+            (x.map(|x| x as f64),),
+            &x.map(|x| Point { x, y: 0 }),
+        )?;
+    }
     instance.check(
         "describe-wide",
         (u64::MAX,),

@@ -96,3 +96,11 @@ try {
 } catch (e) {
   console.log(e === typed, JSON.stringify({ ...typed, extra: 1 }));
 }
+
+function childPath(address: string): string {
+  const url = new URL(address);
+  let prefix = url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+  prefix += "/child";
+  return prefix;
+}
+console.log(childPath("https://example.test/a/"), childPath("https://example.test/b"));

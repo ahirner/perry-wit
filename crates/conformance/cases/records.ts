@@ -342,3 +342,20 @@ function forwarded<T>(value: T) { return forwardTarget(value); }
 function forwardTarget<U>(value: U): U { return value; }
 const forwardedLocal = forwarded(2);
 console.log("forwarded-local", forwardedLocal);
+
+function spellSymbols(symbols: { key: string; spelling: string }[]): string[] {
+  const byKey = new Map(symbols.map(symbol => [symbol.key, symbol] as const));
+  const spellings: string[] = [];
+  for (const [key, symbol] of byKey) {
+    for (let suffix = symbol.spelling; suffix.length > 0; suffix = suffix.slice(1)) {
+      spellings.push(key + "=" + suffix);
+    }
+  }
+  return spellings;
+}
+console.log(JSON.stringify(spellSymbols([{ key: "x", spelling: "ab" }, { key: "y", spelling: "c" }])));
+
+function revisions(keys: string[], saved: Map<string, string>): { prior: string | null; next: string }[] {
+  return keys.map(key => ({ prior: saved.get(key) ?? null, next: key }));
+}
+console.log("nullable-history", JSON.stringify(revisions(["d", "e"], new Map([["d", "D"]]))));
