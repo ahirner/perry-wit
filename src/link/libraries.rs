@@ -33,6 +33,9 @@ macro_rules! libraries {
 
 libraries! {
     Runtime => "runtime.wasm",
+    P2 => "p2.wasm",
+    P2Io => "p2-io.wasm",
+    P2Http => "p2-http.wasm",
     Std => "std.wasm",
     Fs => "fs.wasm",
     Web => "web.wasm",
@@ -51,6 +54,9 @@ libraries! {
 impl LibraryId {
     pub(crate) fn for_entry(entry: &str) -> Result<Self> {
         Ok(match entry {
+            entry if entry.starts_with("p2_io_") => Self::P2Io,
+            entry if entry.starts_with("p2_http_") => Self::P2Http,
+            entry if entry.starts_with("p2_") => Self::P2,
             entry if entry.starts_with("perry_") || entry == "cabi_realloc" => Self::Runtime,
             "std_parse_float" | "std_string_to_number" => Self::Decimal,
             "number_format" => Self::Number,
@@ -162,6 +168,8 @@ pub(crate) struct Library<'a> {
     pub(crate) elements: Vec<(u32, u32)>,
     pub(crate) table_size: u32,
     pub(crate) table_alignment: u32,
+    /// The P2 scheduler invokes backend callbacks across library boundaries.
+    pub(crate) external_callbacks: bool,
 }
 
 impl<'a> Library<'a> {
@@ -367,6 +375,7 @@ impl<'a> Library<'a> {
             elements: vec![],
             table_size: 0,
             table_alignment: 1,
+            external_callbacks: false,
         };
         ensure_internal!(
             library
@@ -587,6 +596,9 @@ impl<'a> Library<'a> {
             self.initializers()
                 .filter(|f| !folded_initializers.contains(f)),
         );
+        if self.external_callbacks {
+            pending.extend(self.elements.iter().map(|&(_, function)| function));
+        }
         let mut reachable = BTreeSet::new();
         while let Some(function) = pending.pop() {
             if selected.contains(&function) || !reachable.insert(function) {

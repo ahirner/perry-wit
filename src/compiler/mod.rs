@@ -140,7 +140,7 @@ pub(crate) fn compile_sources(
         &foreign,
         Some((resolve, world)),
     )?;
-    let mut exports = bind::exports(&mut layouts, ctx, targets)?;
+    let mut exports = bind::exports(&mut layouts, world, ctx, targets)?;
     let mut analyses = optimize(ctx, &mir, options.limits)?;
     bind::finalize_exports(ctx, &mir, &mut exports)?;
     emit_component(
@@ -173,13 +173,20 @@ pub(super) fn emit_component(
     strip_unused_stdio: bool,
 ) -> Result<Compiled> {
     let imports = bind::imports(resolve, world);
+    let target = perry_contract::target::for_world(resolve, world);
+    let p2 = target == perry_contract::target::Target::P2;
     let streams = bind::stream_anchor(resolve, world);
     let stdout = !strip_unused_stdio || uses_stdout(ctx, mir);
-    let stderr = !strip_unused_stdio || imports.iter().any(|name| name == "wasi:cli/stderr@0.3.0");
+    let stderr = !strip_unused_stdio
+        || imports.iter().any(|name| match target {
+            perry_contract::target::Target::P2 => name.starts_with("wasi:cli/stderr@0.2."),
+            perry_contract::target::Target::P3 => name == "wasi:cli/stderr@0.3.0",
+        });
     let exports = Exports::Canonical {
+        p2,
         memory_checks,
         exports,
-        imports,
+        imports: &imports,
         bindings,
         resources,
     };
@@ -189,6 +196,10 @@ pub(super) fn emit_component(
         core,
         streams.as_ref(),
         &link::canonical::Requirements::for_world(resolve, world),
+        &link::RuntimeImports {
+            target,
+            interfaces: &imports,
+        },
         |module, _| match module {
             "wasi:cli/stdout@0.3.0" => !stdout,
             "wasi:cli/stderr@0.3.0" => !stderr,
@@ -237,6 +248,7 @@ pub(crate) fn compile_core_sources(
         core,
         None,
         &link::canonical::Requirements::default(),
+        &link::RuntimeImports::RAW,
         |module, name| {
             name.ends_with(component::reactions::ANCHOR)
                 || (module == "$root"
@@ -279,10 +291,12 @@ fn finish(
     core: Vec<u8>,
     streams: Option<&link::StreamAnchor>,
     canonical: &link::canonical::Requirements,
+    runtime: &link::RuntimeImports,
     stub_runtime_import: impl Fn(&str, &str) -> bool,
 ) -> Result<(Vec<u8>, u32)> {
-    let (core, helpers) = link::link_helpers_with(core, streams, canonical, stub_runtime_import)
-        .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
+    let (core, helpers) =
+        link::link_helpers_with(core, streams, canonical, runtime, stub_runtime_import)
+            .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
     audit::validate_guest(&core)
         .map_err(|err| err.with_internal_context("validating stackless core Wasm"))?;
     Ok((core, helpers))

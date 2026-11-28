@@ -1,0 +1,11 @@
+package example:dual-preview;
+
+world p2 {
+  include wasi:cli/imports@0.2.12;
+  export echo: func(value: string) -> string;
+}
+
+world p3 {
+  include wasi:cli/imports@0.3.0;
+  export echo: async func(value: string) -> string;
+}

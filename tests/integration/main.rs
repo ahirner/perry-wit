@@ -40,6 +40,7 @@ mod mir_collection_test;
 mod mir_string_test;
 mod object_test;
 mod optimization_test;
+mod p2_test;
 mod resource_test;
 mod runtime_error_test;
 mod sdk_test;

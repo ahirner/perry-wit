@@ -5,6 +5,64 @@ mod memory;
 mod time;
 
 #[test]
+fn direct_runtime_imports_bind_to_the_world_without_linking_helpers() -> anyhow::Result<()> {
+    use super::{RuntimeImports, canonical::Requirements, link_helpers_with};
+    use perry_contract::target::Target;
+
+    let native = "wasi:clocks/system-clock@0.3.0";
+    let older = "wasi:clocks/wall-clock@0.2.9";
+    let core = wat::parse_str(format!(r#"(module (import "{native}" "now" (func)))"#))?;
+    for (target, interfaces, expected) in [
+        (Target::P2, vec![older.into()], older),
+        (Target::P3, vec![older.into()], older),
+        (Target::P3, vec![native.into(), older.into()], native),
+    ] {
+        let (linked, helpers) = link_helpers_with(
+            core.clone(),
+            None,
+            &Requirements::default(),
+            &RuntimeImports {
+                target,
+                interfaces: &interfaces,
+            },
+            |_, _| false,
+        )?;
+        assert_eq!(helpers, 0);
+        assert_eq!(ParsedModule::parse(&linked)?.imports[0].0, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn callbacks_invoked_by_another_library_keep_their_dependencies() -> anyhow::Result<()> {
+    let bytes = wat::parse_str(
+        r#"(module
+        (import "env" "memory" (memory 1))
+        (import "env" "__table_base" (global $table-base i32))
+        (import "env" "__indirect_function_table" (table 1 funcref))
+        (import "host" "complete" (func $complete))
+        (func $step (call $complete))
+        (elem (global.get $table-base) func $step)
+        (func (export "register") (result i32) (global.get $table-base)))"#,
+    )?;
+    let mut library = Library::parse(&bytes)?;
+    let empty = std::collections::BTreeSet::new();
+    let ordinary = library.reachable(["register"], &empty, &empty)?;
+    assert!(
+        !ordinary.contains(&0),
+        "no local indirect call reaches the host"
+    );
+    library.external_callbacks = true;
+    let callbacks = library.reachable(["register"], &empty, &empty)?;
+    assert!(
+        callbacks.contains(&0),
+        "the externally invoked callback needs its host import"
+    );
+    assert!(callbacks.contains(&1));
+    Ok(())
+}
+
+#[test]
 fn linked_sections_keep_references_initialization_and_passive_segments() -> anyhow::Result<()> {
     let core = wat::parse_str(
         r#"(module
@@ -34,9 +92,13 @@ fn linked_sections_keep_references_initialization_and_passive_segments() -> anyh
             global.get $started i32.add i32.const 8 i32.load8_u i32.add)
         (export "measure" (func $measure)))"#,
     )?;
-    let (linked, _) = super::link_helpers_with(core, None, &Default::default(), |module, name| {
-        module == perry_codegen::HELPER_MODULE && name == "perry_alloc"
-    })?;
+    let (linked, _) = super::link_helpers_with(
+        core,
+        None,
+        &Default::default(),
+        &super::RuntimeImports::RAW,
+        |module, name| module == perry_codegen::HELPER_MODULE && name == "perry_alloc",
+    )?;
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &linked)?;
     let mut linker = wasmtime::Linker::new(&engine);

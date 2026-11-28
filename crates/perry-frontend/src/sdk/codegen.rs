@@ -101,10 +101,12 @@ fn export_result_types(names: &TsNames<'_>, function: &Function) -> Vec<String> 
     types
 }
 
-fn export_return_ts(names: &TsNames<'_>, func: &Function) -> String {
+fn export_return_ts(names: &TsNames<'_>, func: &Function, p2: bool) -> String {
     let ret_ty = export_result_types(names, func).join(" | ");
     if func.kind.is_async() {
         format!("Promise<{ret_ty}>")
+    } else if p2 {
+        format!("{ret_ty} | Promise<{ret_ty}>")
     } else {
         ret_ty
     }
@@ -167,6 +169,8 @@ fn world_type_declarations(names: &TsNames<'_>) -> String {
 pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
     perry_contract::export_names::validate_implementation_names(resolve, world)
         .map_err(|error| Diagnostic::new(codes::CONTRACT_MISMATCH, error.to_string()))?;
+    let p2 = perry_contract::target::for_definition(resolve, world)
+        == perry_contract::target::Target::P2;
     let names = &TsNames::new(resolve, world);
     let mut out = String::new();
 
@@ -185,7 +189,7 @@ pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                     WorldKey::Interface(_) => &func.name,
                 };
                 let ts_func_name = to_camel_case(export_name);
-                let ret_ty = export_return_ts(names, func);
+                let ret_ty = export_return_ts(names, func, p2);
                 let _ = write!(
                     out,
                     "/**\n * WIT export: `{export_name}`\n */\nexport declare function {ts_func_name}("
@@ -195,7 +199,7 @@ pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                     out,
                     "): {ret_ty};\nexport type {}Fn = {};\n",
                     to_pascal_case(export_name),
-                    implementation_signature(names, func, false),
+                    implementation_signature(names, func, p2),
                 );
             }
             WorldItem::Interface { id, .. } => {
@@ -212,7 +216,7 @@ pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
                 let _ = writeln!(out, "export namespace {iface_name} {{");
                 for (_, func) in &iface.functions {
                     let ts_name = to_camel_case(&func.name);
-                    let ret_ty = export_return_ts(names, func);
+                    let ret_ty = export_return_ts(names, func, p2);
                     let _ = write!(out, "  export function {ts_name}(");
                     emit_params(&mut out, names, func);
                     let _ = writeln!(out, "): {ret_ty};");
@@ -229,7 +233,7 @@ pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> R
     for entry in perry_contract::world_functions(resolve, world.exports.iter()) {
         let opt =
             if perry_contract::export_names::core_export_name(resolve, entry.key, entry.function)
-                == "wasi:cli/run@0.3.0#run"
+                .starts_with("wasi:cli/run@")
             {
                 "?"
             } else {

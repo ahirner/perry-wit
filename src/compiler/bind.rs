@@ -104,11 +104,14 @@ fn constrain_numbers(ctx: &mut Context, function: &FuncOp, exports: &[&Export]) 
 
 pub(super) fn exports(
     layouts: &mut Layouts,
+    world: WorldId,
     ctx: &mut Context,
     targets: Vec<perry_frontend::ExportTarget>,
 ) -> Result<Vec<Export>> {
     use perry_frontend::ExportTarget;
     let resolve = layouts.resolve;
+    let p2 =
+        perry_contract::target::for_world(resolve, world) == perry_contract::target::Target::P2;
     let mut bound = Vec::with_capacity(targets.len());
     for target in targets {
         let (mir_function, entry, annotations, source_name, command) = match target {
@@ -146,7 +149,8 @@ pub(super) fn exports(
         let signature = layouts.signature(function, false);
         let implementation = mir_function.get_symbol_name(ctx).to_string();
         let expected_async = function.kind.is_async();
-        if !command && perry_mir::is_async(ctx, &mir_function) != expected_async {
+        let is_async = perry_mir::is_async(ctx, &mir_function);
+        if !command && is_async != expected_async && !(p2 && is_async) {
             let implementation = source_name.as_deref().unwrap_or(&implementation);
             let help = if expected_async {
                 format!(
@@ -176,7 +180,7 @@ pub(super) fn exports(
                 function.result.map(|ty| layouts.value(ty)).transpose()?,
             )
         };
-        let kind = if expected_async || command {
+        let kind = if is_async || command {
             let module = if command || entry.interface.is_some() {
                 format!("[export]{}", resolve.name_world_key(entry.key))
             } else {
@@ -323,7 +327,7 @@ mod tests {
         )?;
         let mut targets = program.exports;
         targets.reverse();
-        let bound = exports(&mut Layouts::new(&resolve)?, ctx, targets)?;
+        let bound = exports(&mut Layouts::new(&resolve)?, world, ctx, targets)?;
         assert_eq!(
             bound
                 .iter()

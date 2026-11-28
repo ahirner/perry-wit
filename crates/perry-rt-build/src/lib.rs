@@ -9,8 +9,8 @@ use std::{
 
 type Result<T> = core::result::Result<T, Box<dyn core::error::Error>>;
 
-/// Build or copy the declared runtime artifacts into `output`.
-pub fn build(runtime: &Path, output: &Path) -> Result<()> {
+/// Build or copy the runtime artifacts and locate the WIT used by their WASI 0.2 bindings.
+pub fn build(runtime: &Path, output: &Path) -> Result<PathBuf> {
     if output.exists() {
         fs::remove_dir_all(output)?;
     }
@@ -21,27 +21,13 @@ pub fn build(runtime: &Path, output: &Path) -> Result<()> {
     println!("cargo:rerun-if-env-changed=PERRY_RUNTIME_TARGET_DIR");
     println!("cargo:rerun-if-env-changed=PERRY_PREBUILT_RUNTIME_DIR");
     println!("cargo:rerun-if-env-changed=RUSTC");
-    if let Some(source) = env::var_os("PERRY_PREBUILT_RUNTIME_DIR") {
-        let source = Path::new(&source);
-        println!("cargo:rerun-if-changed={}", source.display());
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            if entry.path().extension().is_some_and(|ext| ext == "wasm") {
-                let bytes = fs::read(entry.path())?;
-                wasmparser::Validator::new().validate_all(&bytes)?;
-                fs::write(output.join(entry.file_name()), bytes)?;
-            }
-        }
-        return Ok(());
-    }
-    compile_json_codecs(runtime, output)?;
     let metadata = cargo(runtime)
         .args([
             "metadata",
             "--locked",
             "--offline",
             "--format-version=1",
-            "--no-deps",
+            "--filter-platform=wasm32-unknown-unknown",
         ])
         .output()?;
     if !metadata.status.success() {
@@ -55,7 +41,31 @@ pub fn build(runtime: &Path, output: &Path) -> Result<()> {
     let packages = metadata["packages"]
         .as_array()
         .ok_or("runtime packages missing")?;
-    for package in packages {
+    let p2_wit = packages
+        .iter()
+        .find(|package| package["name"] == "wasip2")
+        .and_then(|package| package["manifest_path"].as_str())
+        .and_then(|manifest| Path::new(manifest).parent())
+        .ok_or("wasip2 missing from the locked runtime dependencies")?
+        .join("wit/deps");
+    if let Some(source) = env::var_os("PERRY_PREBUILT_RUNTIME_DIR") {
+        let source = Path::new(&source);
+        println!("cargo:rerun-if-changed={}", source.display());
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            if entry.path().extension().is_some_and(|ext| ext == "wasm") {
+                let bytes = fs::read(entry.path())?;
+                wasmparser::Validator::new().validate_all(&bytes)?;
+                fs::write(output.join(entry.file_name()), bytes)?;
+            }
+        }
+        return Ok(p2_wit);
+    }
+    compile_json_codecs(runtime, output)?;
+    for package in packages
+        .iter()
+        .filter(|package| package["source"].is_null())
+    {
         let manifest = Path::new(
             package["manifest_path"]
                 .as_str()
@@ -81,7 +91,7 @@ pub fn build(runtime: &Path, output: &Path) -> Result<()> {
             compile_artifact(runtime, output, package, artifact)?;
         }
     }
-    Ok(())
+    Ok(p2_wit)
 }
 
 fn cargo(runtime: &Path) -> Command {

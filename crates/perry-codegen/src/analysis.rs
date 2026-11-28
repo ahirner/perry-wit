@@ -19,7 +19,7 @@ use pliron::{
 pub(crate) fn reachable_functions(
     ctx: &Context,
     module: &ModuleOp,
-    exports: &Exports,
+    exports: &Exports<'_>,
 ) -> Vec<FuncOp> {
     perry_mir::reachable_functions(ctx, module.get_operation(), |function| {
         let name = function.get_symbol_name(ctx);

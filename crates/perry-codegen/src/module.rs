@@ -132,6 +132,7 @@ impl Data {
 /// What the lowering of a module accumulates across its functions. Configuration borrowed
 /// from the [Exports] lives as long as `'e`, so lowering can hold it while emitting.
 pub(crate) struct ModuleState<'e> {
+    pub(crate) p2: bool,
     pub(crate) data: Data,
     pub(crate) wasm: ModuleOp,
     pub(crate) runtime: BTreeSet<Runtime>,
@@ -226,9 +227,37 @@ impl ModuleState<'_> {
 
     /// Whether the WIT world imports `interface` (always, without a world).
     pub(crate) fn can_import(&self, interface: &str) -> bool {
+        let Some(imports) = &self.imports else {
+            return true;
+        };
+        if self.p2 {
+            self.p2_counterpart(interface).is_some()
+        } else {
+            imports.contains(interface)
+        }
+    }
+
+    /// The WASI 0.2 interface the world imports in place of the WASI 0.3 `interface`.
+    /// A component that mixes generations uses the P3 ABI and may import only this one.
+    pub(crate) fn p2_counterpart(&self, interface: &str) -> Option<&str> {
+        let base = interface.strip_suffix("@0.3.0")?;
+        let base = match base {
+            "wasi:http/client" => "wasi:http/outgoing-handler",
+            "wasi:clocks/system-clock" => "wasi:clocks/wall-clock",
+            other => other,
+        };
+        let prefix = format!("{base}@0.2.");
         self.imports
-            .as_ref()
-            .is_none_or(|imports| imports.contains(interface))
+            .as_ref()?
+            .iter()
+            .copied()
+            .find(|name| name.starts_with(&prefix))
+    }
+
+    /// Whether a runtime service that never waits can bind `interface`, or its WASI 0.2
+    /// counterpart: both generations give these functions the same synchronous signature.
+    pub(crate) fn can_import_sync(&self, interface: &str) -> bool {
+        self.can_import(interface) || self.p2_counterpart(interface).is_some()
     }
 }
 
@@ -236,7 +265,7 @@ impl ModuleState<'_> {
 pub(crate) fn lower(
     ctx: &mut Context,
     mir: &ModuleOp,
-    exports: &Exports,
+    exports: &Exports<'_>,
     analyses: &mut AnalysisManager,
     allocation_report: Option<&mut String>,
 ) -> Result<(ModuleOp, Vec<u8>, bool)> {
@@ -271,6 +300,7 @@ pub(crate) fn lower(
         }
     );
     let mut state = ModuleState {
+        p2: matches!(exports, Exports::Canonical { p2: true, .. }),
         data: Data {
             bytes: if matches!(exports, Exports::RawChecked) {
                 vec![0; 8]
@@ -457,6 +487,7 @@ fn bind_exports(
     exports: &[boundary::Export],
 ) -> Result<()> {
     if state.uses_io
+        && !state.p2
         && let Some(export) = exports.iter().find(|e| !e.is_async())
     {
         return Err(diag!(

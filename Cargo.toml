@@ -3,7 +3,7 @@ name = "perry-wit"
 version = "0.2.2"
 edition = "2024"
 default-run = "perry-wit"
-description = "Compile TypeScript into WASI 0.3 WebAssembly components"
+description = "Compile TypeScript into WASI 0.2 and 0.3 WebAssembly components"
 authors = ["Alexander Hirner"]
 license = "Apache-2.0"
 repository = "https://github.com/ahirner/perry-wit"
@@ -55,8 +55,8 @@ wasm-encoder = "0.261"
 wasmparser = "0.261"
 wasmprinter = "0.261.0"
 wasmtime = { version = "=50.0.1", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
-wasmtime-wasi = { version = "=50.0.1", default-features = false, features = ["p3"] }
-wasmtime-wasi-http = { version = "=50.0.1", default-features = false, features = ["p3", "default-send-request"] }
+wasmtime-wasi = { version = "=50.0.1", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "=50.0.1", default-features = false, features = ["p2", "p3", "default-send-request"] }
 wat = "~1.261.0"
 wit-parser = "0.261"
 
