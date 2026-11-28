@@ -135,7 +135,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.switch_to(done);
         }
         self.locals
-            .insert(param.id, LocalBinding::slot(slot, binding, is_never));
+            .insert(param.id, LocalBinding::slot(slot, binding, is_never))?;
         if let Some(crate::engine::Storage::Boxed { ty, .. }) = self.local_storage(param.id) {
             let (record, payload) = self.shapes.box_layout(ctx, ty, false)?;
             let value = self.load(ctx, slot)?;
@@ -143,7 +143,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let value = self.emit_value(AllocOp::new(ctx, record, vec![value]), ctx);
             let binding = self.initialized_local(ctx, value);
             self.locals
-                .insert(param.id, binding.captured(payload, false));
+                .insert(param.id, binding.captured(payload, false))?;
         }
         Ok(())
     }
@@ -192,7 +192,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                         let (_, payload) = self.shapes.box_layout(ctx, ty, deferred)?;
                         binding = binding.captured(payload, deferred);
                     }
-                    self.locals.insert(local, binding);
+                    self.locals.insert(local, binding)?;
                 }
             }
             program::Parameter::Native => bail_internal!("native argument in source function"),
@@ -685,7 +685,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         if self.variant_guards.depth() == 0 {
             return;
         }
-        for &id in self.shapes.globals.keys() {
+        for (id, _) in self.shapes.global_bindings() {
             self.variant_guards.assign(id);
         }
     }

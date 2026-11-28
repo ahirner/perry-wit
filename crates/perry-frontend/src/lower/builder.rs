@@ -58,7 +58,7 @@ pub(super) struct FunctionBuilder<'s, 'm> {
     pub(super) block: Ptr<BasicBlock>,
     pub(super) frame: frame::Frame<'s>,
     pub(super) handler: Option<Handler>,
-    pub(super) locals: bindings::Bindings<LocalBinding>,
+    pub(super) locals: bindings::Bindings<'s, LocalBinding>,
     pub(super) variant_guards: crate::narrowing::Guards<'s>,
     pub(super) never_values: HashSet<Value>,
     pub(super) global_slots: HashSet<Value>,
@@ -93,13 +93,12 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
         );
         let globals: Vec<_> = builder
             .shapes
-            .globals
-            .iter()
-            .filter_map(|(&id, &binding)| Some((id, binding?)))
+            .global_bindings()
+            .filter_map(|(id, binding)| Some((id, binding?)))
             .collect();
         for (id, layout) in globals {
             let slot = builder.global_slot(ctx, id, layout.slot)?;
-            builder.locals.insert(id, layout.at(slot));
+            builder.locals.insert(id, layout.at(slot))?;
         }
         let statements = match signature.body {
             Body::Initializer(statements) => statements,
@@ -183,6 +182,7 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
         shapes: &'m mut Shapes<'s>,
     ) -> Self {
         let entry = func.get_entry_block(ctx);
+        let specialization = shapes.specialization;
         let region = func.get_operation().deref(ctx).get_region(0);
         Self {
             region,
@@ -191,7 +191,7 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             block: entry,
             frame: frame::Frame::new(BodyOwner::Initializer, None),
             handler: None,
-            locals: Default::default(),
+            locals: bindings::Bindings::new(&specialization.instances.locals),
             variant_guards: Default::default(),
             never_values: HashSet::new(),
             global_slots: HashSet::new(),
@@ -331,7 +331,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     pub(super) fn local_binding(&self, id: LocalId) -> Result<LocalBinding> {
-        self.locals.get(&id).copied().ok_or_else(|| {
+        self.locals.get(id).ok_or_else(|| {
             unsupported!(
                 "unsupported reference to local {id} (globals and captures are not supported yet)"
             )
@@ -421,14 +421,14 @@ impl<'s> FunctionBuilder<'s, '_> {
         id: LocalId,
         layout: LocalBinding<TypeHandle>,
     ) -> Result<Value> {
-        let slot = if let Some(global) = self.shapes.globals.get_mut(&id) {
+        let slot = if let Some(global) = self.shapes.global_mut(id) {
             *global = Some(layout);
             self.global_slot(ctx, id, layout.slot)?
         } else {
             self.entry_slot(ctx, layout.slot)
         };
         self.variant_guards.assign(id);
-        self.locals.insert(id, layout.at(slot));
+        self.locals.insert(id, layout.at(slot))?;
         Ok(slot)
     }
 

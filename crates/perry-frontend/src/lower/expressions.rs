@@ -467,13 +467,9 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<T> {
         let value = self.expression(ctx, expr)?;
         let binding = self.initialized_local(ctx, value);
-        let previous = self.locals.insert(id, binding);
+        let previous = self.locals.replace(id, Some(binding))?;
         let result = body(self, ctx);
-        if let Some(previous) = previous {
-            self.locals.insert(id, previous);
-        } else {
-            self.locals.remove(&id);
-        }
+        self.locals.replace(id, previous)?;
         result
     }
 

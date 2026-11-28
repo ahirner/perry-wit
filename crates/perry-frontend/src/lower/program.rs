@@ -291,7 +291,7 @@ pub(crate) fn build_module<'r>(
                 && declaration
                     .captures
                     .iter()
-                    .any(|id| !shapes.globals.contains_key(id)))
+                    .any(|&id| shapes.global(id).is_none()))
         {
             Body::Inline(function)
         } else {
@@ -389,7 +389,7 @@ pub(crate) fn build_module<'r>(
                         || specialization.templates[f.template]
                             .captures
                             .iter()
-                            .all(|id| shapes.globals.get(id).is_some_and(Option::is_some)),
+                            .all(|&id| shapes.global(id).flatten().is_some()),
                     "closures capturing activation-local values are unsupported: {name}"
                 );
                 f.is_exported

@@ -275,13 +275,6 @@ impl<'s> InstancePlans<'s> {
         self.decisions.storage(owner, self.locals.index(id)?)
     }
 
-    pub(crate) fn globals(&self) -> impl Iterator<Item = perry_hir::types::LocalId> + '_ {
-        self.locals
-            .rows
-            .iter()
-            .filter(|local| local.flags.contains(types::LocalFlags::GLOBAL_SLOT))
-            .map(|local| local.id)
-    }
     pub(crate) fn local(&self, id: perry_hir::types::LocalId) -> Result<&types::LocalInfo<'s>> {
         Ok(&self.locals.rows[self.local_id(id)?])
     }

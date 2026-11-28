@@ -59,7 +59,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     )?;
                     let binding = self.initialized_local(ctx, value);
                     self.variant_guards.assign(element.id);
-                    self.locals.insert(element.id, binding);
+                    self.locals.insert(element.id, binding)?;
                     let done = self.not(ctx, available);
                     self.store(ctx, self.local(element.done)?, done);
                     rest
